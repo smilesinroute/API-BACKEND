@@ -1,16 +1,29 @@
-// apps/api/src/routes/admin.js
+// src/routes/admin.js
 const express = require('express');
 const router = express.Router();
+const pool = require('../utils/db');
 
-// Simple admin stub - expand with auth & useful endpoints
-router.get('/health', (req, res) => {
-  res.json({ ok: true, uptime: process.uptime() });
+// GET /api/admin/orders
+router.get('/orders', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Admin fetch orders error:', err);
+    res.status(500).json({ error: 'Failed to fetch orders' });
+  }
 });
 
-// Example: list recent bookings (implement DB query in services later)
-router.get('/recent-bookings', async (req, res) => {
-  // Placeholder - replace with real DB query
-  res.json({ bookings: [], note: 'Implement DB query in bookingService' });
+// GET /api/admin/customers
+router.get('/customers', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM customers ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Admin fetch customers error:', err);
+    res.status(500).json({ error: 'Failed to fetch customers' });
+  }
 });
 
 module.exports = router;
+

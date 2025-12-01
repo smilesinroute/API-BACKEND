@@ -1,45 +1,64 @@
-﻿// apps/api/src/index.js
+﻿// src/index.js
 const express = require('express');
+const bodyParser = require('body-parser');
 const cors = require('cors');
-const morgan = require('morgan');
 require('dotenv').config();
 
-const bookingsRouter = require('./routes/bookings');
-const schedulingRouter = require('./routes/scheduling');
-const driversRouter = require('./routes/drivers');
-const pricingRouter = require('./routes/pricing');
+// Routers
+const quoteRouter = require('./routes/quote');
+const ordersRouter = require('./routes/orders');
+const vehiclesRouter = require('./routes/vehicles');
+const notaryRouter = require('./routes/notary');
 const adminRouter = require('./routes/admin');
+const pricingRouter = require('./routes/pricing');
+const schedulingRouter = require('./routes/scheduling');
+const courierRouter = require('./routes/courier');
+const driversRouter = require('./routes/drivers');
+const paymentRouter = require('./routes/paymentRoutes');
+const sheetsRouter = require('./routes/sheetsRoutes');
 
+const PORT = process.env.PORT || 3000;
 const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '5mb' }));
-app.use(morgan('dev'));
+app.use(bodyParser.json());
 
 // Health check
-app.get('/', (req, res) => {
-  res.json({ status: '✅ API portal running', timestamp: new Date() });
+app.get('/api/health', (req, res) => {
+  res.json({
+    message: "Smiles In Route API",
+    status: "healthy",
+    timestamp: new Date(),
+    version: "2.0"
+  });
 });
 
-// Mount routers
-app.use('/api/bookings', bookingsRouter);
-app.use('/api/scheduling', schedulingRouter);
-app.use('/api/drivers', driversRouter);
-app.use('/api/pricing', pricingRouter);
+// Routes
+app.use('/api/quote', quoteRouter);
+app.use('/api/orders', ordersRouter);
+app.use('/api/vehicles', vehiclesRouter);
+app.use('/api/notary', notaryRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/pricing', pricingRouter);
+app.use('/api/scheduling', schedulingRouter);
+app.use('/api/courier', courierRouter);
+app.use('/api/drivers', driversRouter);
+app.use('/api/payment', paymentRouter);
+app.use('/api/sheets', sheetsRouter);
 
-// 404
-app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
+// Default 404
+app.use((req, res) => {
+  res.status(404).json({ error: "Endpoint not found" });
+});
 
 // Error handler
 app.use((err, req, res, next) => {
-  console.error('API error:', err);
-  res.status(500).json({ error: 'Internal Server Error', message: err.message });
+  console.error("SERVER ERROR:", err);
+  res.status(500).json({ error: "Internal server error", details: err.message });
 });
 
 // Start server
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`🟢 API portal listening on port ${PORT}`));
-
-module.exports = app;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Smiles API running on port ${PORT}`);
+});
