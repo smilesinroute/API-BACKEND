@@ -5,7 +5,7 @@
     "dev": "node src/index.js",
     "payment-server": "node payment-server.js",
     "scheduling-server": "node scheduling-server.js",
-    "start": "node src/index.js"
+    "start": "node server.js"
   },
   "main": "src/index.js",
   "dependencies": {
@@ -14,9 +14,8 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "googleapis": "^159.0.0",
+    "morgan": "^1.10.1",
     "pg": "^8.16.3",
     "stripe": "^14.21.0"
   }
 }
-
-
