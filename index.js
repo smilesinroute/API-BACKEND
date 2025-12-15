@@ -3,8 +3,6 @@ const url = require('url');
 const { Pool } = require('pg');
 const { appendRow } = require('./googleSheets');
 
-const PORT = process.env.PORT || 3000;
-
 // PostgreSQL connection
 const pool = new Pool({
     user: process.env.PG_USER || 'postgres',
@@ -304,22 +302,10 @@ async function syncToSheets() {
     }
 }
 
-const server = http.createServer(handleAPI);
-
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Smiles API running on port ${PORT}`);
-    console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-    
-    // Test database connection
-    pool.query('SELECT NOW()', (err, res) => {
-        if (err) {
-            console.error('❌ Database connection failed:', err.message);
-        } else {
-            console.log('✅ Database connected successfully');
-            // Sync to sheets after database connection confirmed
-            if (process.env.SHEETS_ID) {
-                syncToSheets();
-            }
-        }
-    });
-});
+// Disable standalone server startup to avoid port conflicts.
+// Export the handler so it can be mounted under Express in server.js later if needed.
+module.exports = {
+  handleAPI,
+  pool,
+  syncToSheets,
+};
