@@ -39,23 +39,23 @@ router.get("/api/available-slots/:date", async (req, res) => {
     if (serviceType === "delivery") {
       const { data, error } = await supabase
         .from("deliveries")
-        .select("scheduled_time")
+        .select("delivery_time")
         .eq("delivery_date", date)
         .neq("status", "cancelled");
 
       if (error) return res.status(500).json({ error: error.message });
-      bookedTimes = (data || []).map((d) => d.scheduled_time);
+      bookedTimes = (data || []).map((d) => d.delivery_time);
     }
 
     if (serviceType === "notary") {
       const { data, error } = await supabase
         .from("notary_appointments")
-        .select("scheduled_time")
+        .select("appointment_time")
         .eq("appointment_date", date)
         .neq("status", "cancelled");
 
       if (error) return res.status(500).json({ error: error.message });
-      bookedTimes = (data || []).map((n) => n.scheduled_time);
+      bookedTimes = (data || []).map((n) => n.appointment_time);
     }
 
     const slots = generateTimeSlots(serviceType).filter(
