@@ -2,12 +2,10 @@
   "name": "smiles-api",
   "version": "1.0.0",
   "scripts": {
-    "dev": "node index.js",
-    "payment-server": "node payment-server.js",
-    "scheduling-server": "node scheduling-server.js",
-    "start": "node index.js"
+    "dev": "node server.js",
+    "start": "node server.js"
   },
-  "main": "index.js",
+  "main": "server.js",
   "keywords": [],
   "author": "",
   "license": "ISC",
