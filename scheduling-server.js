@@ -9,39 +9,46 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const router = express.Router();
+const app = express();
 
-// Middleware (applied to this router)
-router.use(cors());
-router.use(express.json());
+// Middleware
+app.use(cors());
+app.use(express.json());
 
 // Health check
-router.get('/', (req, res) => {
-  res.json({ status: 'Scheduling API router is running', timestamp: new Date().toISOString() });
+app.get('/', (req, res) => {
+  res.json({ status: 'Scheduling API is running', timestamp: new Date().toISOString() });
 });
 
 // Get available time slots for a specific date
-router.get('/available-slots/:date', async (req, res) => {
+app.get('/api/available-slots/:date', async (req, res) => {
   try {
     const { date } = req.params;
     const { serviceType = 'delivery' } = req.query;
 
+    // Validate date
     const requestedDate = new Date(date);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     if (requestedDate < today) {
-      return res.status(400).json({ error: 'Cannot schedule for past dates' });
+      return res.status(400).json({ 
+        error: 'Cannot schedule for past dates' 
+      });
     }
 
+    // Get existing bookings for this date
     const { data: existingBookings, error } = await supabase
       .from('scheduled_appointments')
       .select('time_slot, service_type')
       .eq('scheduled_date', date)
       .eq('status', 'confirmed');
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
+    // Generate available time slots
     const availableSlots = generateTimeSlots(date, serviceType, existingBookings);
 
     res.json({
@@ -51,14 +58,18 @@ router.get('/available-slots/:date', async (req, res) => {
       totalSlots: availableSlots.length,
       bookedSlots: existingBookings.length
     });
+
   } catch (error) {
     console.error('Error fetching available slots:', error);
-    res.status(500).json({ error: 'Failed to fetch available slots', details: error.message });
+    res.status(500).json({ 
+      error: 'Failed to fetch available slots',
+      details: error.message 
+    });
   }
 });
 
 // Create a new appointment
-router.post('/schedule-appointment', async (req, res) => {
+app.post('/api/schedule-appointment', async (req, res) => {
   try {
     const {
       orderId,
@@ -72,10 +83,14 @@ router.post('/schedule-appointment', async (req, res) => {
       rushService = false
     } = req.body;
 
+    // Validate required fields
     if (!orderId || !customerId || !serviceType || !scheduledDate || !timeSlot) {
-      return res.status(400).json({ error: 'Missing required fields' });
+      return res.status(400).json({ 
+        error: 'Missing required fields' 
+      });
     }
 
+    // Check if time slot is still available
     const { data: existingAppointment } = await supabase
       .from('scheduled_appointments')
       .select('id')
@@ -85,9 +100,12 @@ router.post('/schedule-appointment', async (req, res) => {
       .single();
 
     if (existingAppointment) {
-      return res.status(409).json({ error: 'Time slot is no longer available' });
+      return res.status(409).json({ 
+        error: 'Time slot is no longer available' 
+      });
     }
 
+    // Create the appointment
     const { data: appointment, error } = await supabase
       .from('scheduled_appointments')
       .insert({
@@ -106,8 +124,11 @@ router.post('/schedule-appointment', async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
+    // Update the order with scheduling information
     await supabase
       .from('orders')
       .update({
@@ -127,18 +148,23 @@ router.post('/schedule-appointment', async (req, res) => {
         status: 'confirmed'
       }
     });
+
   } catch (error) {
     console.error('Error creating appointment:', error);
-    res.status(500).json({ error: 'Failed to create appointment', details: error.message });
+    res.status(500).json({ 
+      error: 'Failed to create appointment',
+      details: error.message 
+    });
   }
 });
 
 // Update an existing appointment
-router.put('/appointment/:appointmentId', async (req, res) => {
+app.put('/api/appointment/:appointmentId', async (req, res) => {
   try {
     const { appointmentId } = req.params;
     const updates = req.body;
 
+    // If rescheduling, check new time slot availability
     if (updates.scheduledDate && updates.timeSlot) {
       const { data: conflictingAppointment } = await supabase
         .from('scheduled_appointments')
@@ -150,28 +176,42 @@ router.put('/appointment/:appointmentId', async (req, res) => {
         .single();
 
       if (conflictingAppointment) {
-        return res.status(409).json({ error: 'New time slot is not available' });
+        return res.status(409).json({ 
+          error: 'New time slot is not available' 
+        });
       }
     }
 
     const { data: appointment, error } = await supabase
       .from('scheduled_appointments')
-      .update({ ...updates, updated_at: new Date().toISOString() })
+      .update({
+        ...updates,
+        updated_at: new Date().toISOString()
+      })
       .eq('id', appointmentId)
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
-    res.json({ success: true, appointment });
+    res.json({
+      success: true,
+      appointment
+    });
+
   } catch (error) {
     console.error('Error updating appointment:', error);
-    res.status(500).json({ error: 'Failed to update appointment', details: error.message });
+    res.status(500).json({ 
+      error: 'Failed to update appointment',
+      details: error.message 
+    });
   }
 });
 
 // Cancel an appointment
-router.delete('/appointment/:appointmentId', async (req, res) => {
+app.delete('/api/appointment/:appointmentId', async (req, res) => {
   try {
     const { appointmentId } = req.params;
     const { reason = 'Customer cancellation' } = req.body;
@@ -187,26 +227,40 @@ router.delete('/appointment/:appointmentId', async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
+    // Update related order status
     if (appointment.order_id) {
       await supabase
         .from('orders')
-        .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+        .update({
+          status: 'cancelled',
+          cancelled_at: new Date().toISOString()
+        })
         .eq('id', appointment.order_id);
     }
 
-    res.json({ success: true, message: 'Appointment cancelled successfully' });
+    res.json({
+      success: true,
+      message: 'Appointment cancelled successfully'
+    });
+
   } catch (error) {
     console.error('Error cancelling appointment:', error);
-    res.status(500).json({ error: 'Failed to cancel appointment', details: error.message });
+    res.status(500).json({ 
+      error: 'Failed to cancel appointment',
+      details: error.message 
+    });
   }
 });
 
 // Get appointment details
-router.get('/appointment/:appointmentId', async (req, res) => {
+app.get('/api/appointment/:appointmentId', async (req, res) => {
   try {
     const { appointmentId } = req.params;
+
     const { data: appointment, error } = await supabase
       .from('scheduled_appointments')
       .select(`
@@ -222,17 +276,26 @@ router.get('/appointment/:appointmentId', async (req, res) => {
       .eq('id', appointmentId)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
-    res.json({ success: true, appointment });
+    res.json({
+      success: true,
+      appointment
+    });
+
   } catch (error) {
     console.error('Error fetching appointment:', error);
-    res.status(500).json({ error: 'Failed to fetch appointment', details: error.message });
+    res.status(500).json({ 
+      error: 'Failed to fetch appointment',
+      details: error.message 
+    });
   }
 });
 
 // Get customer's appointments
-router.get('/customer/:customerId/appointments', async (req, res) => {
+app.get('/api/customer/:customerId/appointments', async (req, res) => {
   try {
     const { customerId } = req.params;
     const { status, limit = 10, offset = 0 } = req.query;
@@ -253,16 +316,28 @@ router.get('/customer/:customerId/appointments', async (req, res) => {
       .order('scheduled_date', { ascending: true })
       .range(offset, offset + limit - 1);
 
-    if (status) query = query.eq('status', status);
+    if (status) {
+      query = query.eq('status', status);
+    }
 
     const { data: appointments, error } = await query;
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
-    res.json({ success: true, appointments, total: appointments.length });
+    res.json({
+      success: true,
+      appointments,
+      total: appointments.length
+    });
+
   } catch (error) {
     console.error('Error fetching customer appointments:', error);
-    res.status(500).json({ error: 'Failed to fetch appointments', details: error.message });
+    res.status(500).json({ 
+      error: 'Failed to fetch appointments',
+      details: error.message 
+    });
   }
 });
 
@@ -270,35 +345,59 @@ router.get('/customer/:customerId/appointments', async (req, res) => {
 function generateTimeSlots(date, serviceType, existingBookings = []) {
   const dayOfWeek = new Date(date).getDay();
   const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-
-  const businessHours = { weekday: { start: 8, end: 18 }, weekend: { start: 9, end: 16 } };
+  
+  // Business hours
+  const businessHours = {
+    weekday: { start: 8, end: 18 },
+    weekend: { start: 9, end: 16 }
+  };
+  
   const hours = isWeekend ? businessHours.weekend : businessHours.weekday;
-  const interval = serviceType === 'notary' ? 60 : 30;
-
+  const interval = serviceType === 'notary' ? 60 : 30; // 60min for notary, 30min for delivery
+  
   const slots = [];
   const bookedTimes = existingBookings.map(booking => booking.time_slot);
-
+  
   for (let hour = hours.start; hour < hours.end; hour++) {
     for (let minute = 0; minute < 60; minute += interval) {
       const timeString = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
-
+      
       if (!bookedTimes.includes(timeString)) {
         let label = 'Standard';
         let additionalFee = 0;
-
+        
         if (serviceType === 'delivery') {
-          if (hour < 10) { label = 'Early Morning'; additionalFee = 5; }
-          else if (hour >= 17) { label = 'Evening'; additionalFee = 3; }
+          if (hour < 10) {
+            label = 'Early Morning';
+            additionalFee = 5;
+          } else if (hour >= 17) {
+            label = 'Evening';
+            additionalFee = 3;
+          }
         } else if (serviceType === 'notary') {
-          if (hour < 9 || hour >= 17) { label = 'Premium Time'; additionalFee = 25; }
+          if (hour < 9 || hour >= 17) {
+            label = 'Premium Time';
+            additionalFee = 25;
+          }
         }
-
-        slots.push({ time: timeString, label, additionalFee, available: true });
+        
+        slots.push({
+          time: timeString,
+          label,
+          additionalFee,
+          available: true
+        });
       }
     }
   }
-
+  
   return slots;
 }
 
-module.exports = router;
+const PORT = process.env.PORT || 3002;
+app.listen(PORT, () => {
+  console.log(`📅 Scheduling API server running on port ${PORT}`);
+  console.log(`🔗 API endpoints available at http://localhost:${PORT}/api/*`);
+});
+
+module.exports = app;
