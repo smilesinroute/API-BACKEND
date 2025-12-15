@@ -9,19 +9,19 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const app = express();
+const router = express.Router();
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// Middleware (applied to this router)
+router.use(cors());
+router.use(express.json());
 
 // Health check
-app.get('/', (req, res) => {
+router.get('/', (req, res) => {
   res.json({ status: 'Scheduling API is running', timestamp: new Date().toISOString() });
 });
 
 // Get available time slots for a specific date
-app.get('/api/available-slots/:date', async (req, res) => {
+router.get('/api/available-slots/:date', async (req, res) => {
   try {
     const { date } = req.params;
     const { serviceType = 'delivery' } = req.query;
@@ -69,7 +69,7 @@ app.get('/api/available-slots/:date', async (req, res) => {
 });
 
 // Create a new appointment
-app.post('/api/schedule-appointment', async (req, res) => {
+router.post('/api/schedule-appointment', async (req, res) => {
   try {
     const {
       orderId,
@@ -159,7 +159,7 @@ app.post('/api/schedule-appointment', async (req, res) => {
 });
 
 // Update an existing appointment
-app.put('/api/appointment/:appointmentId', async (req, res) => {
+router.put('/api/appointment/:appointmentId', async (req, res) => {
   try {
     const { appointmentId } = req.params;
     const updates = req.body;
@@ -211,7 +211,7 @@ app.put('/api/appointment/:appointmentId', async (req, res) => {
 });
 
 // Cancel an appointment
-app.delete('/api/appointment/:appointmentId', async (req, res) => {
+router.delete('/api/appointment/:appointmentId', async (req, res) => {
   try {
     const { appointmentId } = req.params;
     const { reason = 'Customer cancellation' } = req.body;
@@ -257,7 +257,7 @@ app.delete('/api/appointment/:appointmentId', async (req, res) => {
 });
 
 // Get appointment details
-app.get('/api/appointment/:appointmentId', async (req, res) => {
+router.get('/api/appointment/:appointmentId', async (req, res) => {
   try {
     const { appointmentId } = req.params;
 
@@ -295,7 +295,7 @@ app.get('/api/appointment/:appointmentId', async (req, res) => {
 });
 
 // Get customer's appointments
-app.get('/api/customer/:customerId/appointments', async (req, res) => {
+router.get('/api/customer/:customerId/appointments', async (req, res) => {
   try {
     const { customerId } = req.params;
     const { status, limit = 10, offset = 0 } = req.query;
@@ -394,10 +394,6 @@ function generateTimeSlots(date, serviceType, existingBookings = []) {
   return slots;
 }
 
-const PORT = process.env.PORT || 3002;
-app.listen(PORT, () => {
-  console.log(`📅 Scheduling API server running on port ${PORT}`);
-  console.log(`🔗 API endpoints available at http://localhost:${PORT}/api/*`);
-});
+module.exports = router;
 
-module.exports = app;
+// Removed standalone app/server and app.listen to ensure server.js is the only entry.
