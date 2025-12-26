@@ -1,24 +1,40 @@
-// apps/api/server.js
-// Render runs this entry. It mounts the scheduling router.
 require('dotenv').config();
-const express = require('express');
-const morgan = require('morgan');
-const cors = require('cors');
+const http = require('http');
+const { Pool } = require('pg');
+const { handleAPI } = require('./index');
 
-const schedulingRouter = require('./scheduling-server');
+const PORT = process.env.PORT || 3000;
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(morgan('dev'));
-
-app.use('/scheduling', schedulingRouter);
-
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Smiles In Route API', routes: ['/scheduling'] });
+/* ---------------------------
+   SUPABASE POSTGRES POOL
+--------------------------- */
+const pool = new Pool({
+  host: process.env.PG_HOST,
+  user: process.env.PG_USER,
+  password: process.env.PG_PASSWORD,
+  database: process.env.PG_DATABASE,
+  port: Number(process.env.PG_PORT),
+  ssl: {
+    require: true,
+    rejectUnauthorized: false,
+  },
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
+/* ---------------------------
+   SERVER
+--------------------------- */
+const server = http.createServer((req, res) =>
+  handleAPI(req, res, pool)
+);
+
+server.listen(PORT, '0.0.0.0', async () => {
+  console.log(`🚀 Smiles API running on port ${PORT}`);
+  console.log(`📊 Health check: /api/health`);
+
+  try {
+    await pool.query('select 1');
+    console.log('✅ Database connected (Supabase)');
+  } catch (err) {
+    console.error('❌ Database connection failed:', err.message);
+  }
 });
