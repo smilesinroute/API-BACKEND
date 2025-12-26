@@ -1,17 +1,30 @@
 ﻿const url = require('url');
 
-/* ---------------------------
-   API Handler (NO DB SETUP)
---------------------------- */
+/*
+========================================
+ API REQUEST HANDLER
+ - Stateless
+ - Uses pg pool passed from server.js
+ - No side effects
+========================================
+*/
 async function handleAPI(req, res, pool) {
   const parsedUrl = url.parse(req.url, true);
-  const path = parsedUrl.pathname;
+  const pathname = parsedUrl.pathname;
   const method = req.method;
 
-  // CORS
+  /* -----------------------------------
+     CORS (required for browser clients)
+  ----------------------------------- */
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET, POST, PUT, DELETE, OPTIONS'
+  );
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type'
+  );
 
   if (method === 'OPTIONS') {
     res.writeHead(200);
@@ -19,12 +32,14 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  /* ---------------------------
+  /* -----------------------------------
      HEALTH CHECK
-  --------------------------- */
-  if (path === '/api/health' && method === 'GET') {
+     GET /api/health
+  ----------------------------------- */
+  if (pathname === '/api/health' && method === 'GET') {
     try {
-      await pool.query('select 1');
+      await pool.query('SELECT 1');
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'healthy',
@@ -41,12 +56,13 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  /* ---------------------------
+  /* -----------------------------------
      DRIVER — GET ORDERS
-  --------------------------- */
-  if (path === '/api/driver/orders' && method === 'GET') {
+     GET /api/driver/orders
+  ----------------------------------- */
+  if (pathname === '/api/driver/orders' && method === 'GET') {
     try {
-      const result = await pool.query(`
+      const { rows } = await pool.query(`
         SELECT
           order_id AS id,
           pickup_address,
@@ -58,21 +74,27 @@ async function handleAPI(req, res, pool) {
       `);
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(result.rows));
+      res.end(JSON.stringify(rows));
     } catch (err) {
-      console.error('Driver orders error:', err.message);
+      console.error('[API] driver/orders error:', err.message);
+
       res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Failed to fetch driver orders' }));
+      res.end(JSON.stringify({
+        error: 'Failed to fetch driver orders',
+      }));
     }
     return;
   }
 
-  /* ---------------------------
-     DEFAULT
-  --------------------------- */
+  /* -----------------------------------
+     FALLBACK — NOT FOUND
+  ----------------------------------- */
   res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'Endpoint not found' }));
+  res.end(JSON.stringify({
+    error: 'Endpoint not found',
+  }));
 }
 
-module.exports = { handleAPI };
-
+module.exports = {
+  handleAPI,
+};
