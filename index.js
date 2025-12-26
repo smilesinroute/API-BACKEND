@@ -42,6 +42,32 @@ async function handleAPI(req, res, pool) {
   }
 
   /* ---------------------------
+     DRIVER — GET ORDERS
+  --------------------------- */
+  if (path === '/api/driver/orders' && method === 'GET') {
+    try {
+      const result = await pool.query(`
+        SELECT
+          order_id AS id,
+          pickup_address,
+          delivery_address,
+          status
+        FROM orders
+        ORDER BY created_at DESC
+        LIMIT 25
+      `);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result.rows));
+    } catch (err) {
+      console.error('Driver orders error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to fetch driver orders' }));
+    }
+    return;
+  }
+
+  /* ---------------------------
      DEFAULT
   --------------------------- */
   res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -49,3 +75,4 @@ async function handleAPI(req, res, pool) {
 }
 
 module.exports = { handleAPI };
+
