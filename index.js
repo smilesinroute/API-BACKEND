@@ -4,8 +4,8 @@
 ========================================
  API REQUEST HANDLER
  - Stateless
- - Uses pg pool passed from server.js
- - Safe for Render + Supabase
+ - Uses Supabase Postgres via pg pool
+ - Schema-aligned (NO guessing)
 ========================================
 */
 async function handleAPI(req, res, pool) {
@@ -14,7 +14,7 @@ async function handleAPI(req, res, pool) {
   const method = req.method;
 
   /* -----------------------------------
-     CORS (required for browser clients)
+     CORS
   ----------------------------------- */
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader(
@@ -67,7 +67,10 @@ async function handleAPI(req, res, pool) {
           id,
           pickup_address,
           delivery_address,
-          status
+          status,
+          service_type,
+          total_amount,
+          created_at
         FROM orders
         ORDER BY created_at DESC
         LIMIT 25
@@ -76,19 +79,18 @@ async function handleAPI(req, res, pool) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(rows));
     } catch (err) {
-      console.error('[API] driver/orders error:', err);
+      console.error('[API] driver/orders error:', err.message);
 
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         error: 'Failed to fetch driver orders',
-        details: err.message,
       }));
     }
     return;
   }
 
   /* -----------------------------------
-     FALLBACK — NOT FOUND
+     FALLBACK
   ----------------------------------- */
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
