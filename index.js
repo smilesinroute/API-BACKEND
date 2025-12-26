@@ -4,8 +4,7 @@
 ========================================
  API REQUEST HANDLER
  - Stateless
- - Uses Supabase Postgres via pg pool
- - Schema-aligned (NO guessing)
+ - Uses pg pool passed from server.js
 ========================================
 */
 async function handleAPI(req, res, pool) {
@@ -13,9 +12,9 @@ async function handleAPI(req, res, pool) {
   const pathname = parsedUrl.pathname;
   const method = req.method;
 
-  /* -----------------------------------
+  /* ---------------------------
      CORS
-  ----------------------------------- */
+  --------------------------- */
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader(
     'Access-Control-Allow-Methods',
@@ -32,14 +31,13 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  /* -----------------------------------
+  /* ---------------------------
      HEALTH CHECK
      GET /api/health
-  ----------------------------------- */
+  --------------------------- */
   if (pathname === '/api/health' && method === 'GET') {
     try {
       await pool.query('SELECT 1');
-
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'healthy',
@@ -56,10 +54,10 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  /* -----------------------------------
+  /* ---------------------------
      DRIVER — GET ORDERS
      GET /api/driver/orders
-  ----------------------------------- */
+  --------------------------- */
   if (pathname === '/api/driver/orders' && method === 'GET') {
     try {
       const { rows } = await pool.query(`
@@ -67,10 +65,7 @@ async function handleAPI(req, res, pool) {
           id,
           pickup_address,
           delivery_address,
-          status,
-          service_type,
-          total_amount,
-          created_at
+          status
         FROM orders
         ORDER BY created_at DESC
         LIMIT 25
@@ -79,25 +74,63 @@ async function handleAPI(req, res, pool) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(rows));
     } catch (err) {
-      console.error('[API] driver/orders error:', err.message);
-
+      console.error('[API] driver/orders:', err.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        error: 'Failed to fetch driver orders',
-      }));
+      res.end(JSON.stringify({ error: 'Failed to fetch orders' }));
     }
     return;
   }
 
-  /* -----------------------------------
-     FALLBACK
-  ----------------------------------- */
+  /* ---------------------------
+     DRIVER — UPDATE STATUS
+     PUT /api/driver/orders/:id/status
+  --------------------------- */
+  if (
+    pathname.startsWith('/api/driver/orders/') &&
+    pathname.endsWith('/status') &&
+    method === 'PUT'
+  ) {
+    const parts = pathname.split('/');
+    const orderId = parts[4]; // /api/driver/orders/:id/status
+
+    let body = '';
+    req.on('data', chunk => (body += chunk));
+    req.on('end', async () => {
+      try {
+        const { status } = JSON.parse(body);
+
+        if (!status) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Status is required' }));
+          return;
+        }
+
+        const { rows } = await pool.query(
+          `
+          UPDATE orders
+          SET status = $1
+          WHERE id = $2
+          RETURNING *
+          `,
+          [status, orderId]
+        );
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(rows[0]));
+      } catch (err) {
+        console.error('[API] update status:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to update status' }));
+      }
+    });
+    return;
+  }
+
+  /* ---------------------------
+     NOT FOUND
+  --------------------------- */
   res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    error: 'Endpoint not found',
-  }));
+  res.end(JSON.stringify({ error: 'Endpoint not found' }));
 }
 
-module.exports = {
-  handleAPI,
-};
+module.exports = { handleAPI };
