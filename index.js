@@ -5,7 +5,7 @@
  API REQUEST HANDLER
  - Stateless
  - Uses pg pool passed from server.js
- - No side effects
+ - Safe for Render + Supabase
 ========================================
 */
 async function handleAPI(req, res, pool) {
@@ -64,7 +64,7 @@ async function handleAPI(req, res, pool) {
     try {
       const { rows } = await pool.query(`
         SELECT
-          order_id AS id,
+          id,
           pickup_address,
           delivery_address,
           status
@@ -76,11 +76,12 @@ async function handleAPI(req, res, pool) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(rows));
     } catch (err) {
-      console.error('[API] driver/orders error:', err.message);
+      console.error('[API] driver/orders error:', err);
 
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         error: 'Failed to fetch driver orders',
+        details: err.message,
       }));
     }
     return;
