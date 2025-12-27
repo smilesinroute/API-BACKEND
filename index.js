@@ -1,6 +1,5 @@
 ﻿const url = require('url');
 const crypto = require('crypto');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 /*
 ========================================
@@ -66,7 +65,7 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
-     HEALTH
+     HEALTH CHECK
   ========================= */
   if (pathname === '/api/health' && method === 'GET') {
     await pool.query('SELECT 1');
@@ -82,9 +81,7 @@ async function handleAPI(req, res, pool) {
     let body = '';
     req.on('data', c => (body += c));
     req.on('end', () => {
-      const payload = JSON.parse(body);
-      const pricing = calculatePricing(payload);
-
+      const pricing = calculatePricing(JSON.parse(body));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         quote_id: crypto.randomUUID(),
@@ -128,7 +125,9 @@ async function handleAPI(req, res, pool) {
 
       const { rows } = await pool.query(
         `UPDATE orders
-         SET scheduled_date=$1, scheduled_time=$2, status='scheduled'
+         SET scheduled_date=$1,
+             scheduled_time=$2,
+             status='scheduled'
          WHERE id=$3
          RETURNING id, status, scheduled_date, scheduled_time`,
         [scheduled_date, scheduled_time, order_id]
@@ -141,48 +140,64 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
-     PAY  ✅ THIS WAS MISSING
+     PAY (Stripe — SAFE)
   ========================= */
   if (pathname === '/api/pay' && method === 'POST') {
     let body = '';
     req.on('data', c => (body += c));
     req.on('end', async () => {
-      const { order_id } = JSON.parse(body);
+      try {
+        if (!process.env.STRIPE_SECRET_KEY) {
+          throw new Error('STRIPE_SECRET_KEY missing');
+        }
+        if (!process.env.STRIPE_SUCCESS_URL || !process.env.STRIPE_CANCEL_URL) {
+          throw new Error('Stripe redirect URLs missing');
+        }
 
-      const { rows } = await pool.query(
-        `SELECT status FROM orders WHERE id=$1`,
-        [order_id]
-      );
+        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+        const { order_id } = JSON.parse(body);
 
-      if (!rows.length || rows[0].status !== 'scheduled') {
-        res.writeHead(409, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Order not schedulable for payment' }));
-        return;
+        const { rows } = await pool.query(
+          `SELECT status FROM orders WHERE id=$1`,
+          [order_id]
+        );
+
+        if (!rows.length || rows[0].status !== 'scheduled') {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Order not schedulable for payment' }));
+          return;
+        }
+
+        const pricing = calculatePricing({});
+
+        const session = await stripe.checkout.sessions.create({
+          mode: 'payment',
+          payment_method_types: ['card'],
+          line_items: [{
+            price_data: {
+              currency: 'usd',
+              product_data: { name: 'Courier Delivery Service' },
+              unit_amount: Math.round(pricing.total * 100),
+            },
+            quantity: 1,
+          }],
+          success_url: process.env.STRIPE_SUCCESS_URL,
+          cancel_url: process.env.STRIPE_CANCEL_URL,
+        });
+
+        await pool.query(
+          `UPDATE orders SET status='payment_pending' WHERE id=$1`,
+          [order_id]
+        );
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ checkout_url: session.url }));
+
+      } catch (err) {
+        console.error('[API] pay error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
       }
-
-      const pricing = calculatePricing({});
-
-      const session = await stripe.checkout.sessions.create({
-        mode: 'payment',
-        line_items: [{
-          price_data: {
-            currency: 'usd',
-            product_data: { name: 'Courier Delivery' },
-            unit_amount: Math.round(pricing.total * 100),
-          },
-          quantity: 1,
-        }],
-        success_url: process.env.STRIPE_SUCCESS_URL,
-        cancel_url: process.env.STRIPE_CANCEL_URL,
-      });
-
-      await pool.query(
-        `UPDATE orders SET status='payment_pending' WHERE id=$1`,
-        [order_id]
-      );
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ checkout_url: session.url }));
     });
     return;
   }
@@ -200,7 +215,7 @@ async function handleAPI(req, res, pool) {
   }
 
   res.writeHead(404);
-  res.end();
+  res.end(JSON.stringify({ error: 'Not found' }));
 }
 
 module.exports = { handleAPI };
