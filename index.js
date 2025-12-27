@@ -4,6 +4,7 @@
 ========================================
  API REQUEST HANDLER
  - Stateless
+ - HTTP (no Express)
  - Uses pg pool passed from server.js
 ========================================
 */
@@ -12,9 +13,9 @@ async function handleAPI(req, res, pool) {
   const pathname = parsedUrl.pathname;
   const method = req.method;
 
-  /* ---------------------------
+  /* =========================
      CORS
-  --------------------------- */
+  ========================= */
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader(
     'Access-Control-Allow-Methods',
@@ -31,10 +32,10 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  /* ---------------------------
+  /* =========================
      HEALTH CHECK
      GET /api/health
-  --------------------------- */
+  ========================= */
   if (pathname === '/api/health' && method === 'GET') {
     try {
       await pool.query('SELECT 1');
@@ -54,22 +55,76 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  /* ---------------------------
+  /* =========================
+     CUSTOMER — CREATE ORDER
+     POST /api/orders
+  ========================= */
+  if (pathname === '/api/orders' && method === 'POST') {
+    let body = '';
+
+    req.on('data', chunk => (body += chunk));
+    req.on('end', async () => {
+      try {
+        const { pickup_address, delivery_address } = JSON.parse(body);
+
+        if (!pickup_address || !delivery_address) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'pickup_address and delivery_address are required',
+          }));
+          return;
+        }
+
+        const { rows } = await pool.query(
+          `
+          INSERT INTO orders (
+            pickup_address,
+            delivery_address,
+            status
+          )
+          VALUES ($1, $2, 'new')
+          RETURNING
+            id,
+            pickup_address,
+            delivery_address,
+            status,
+            created_at
+          `,
+          [pickup_address, delivery_address]
+        );
+
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(rows[0]));
+
+      } catch (err) {
+        console.error('[API] create order:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to create order' }));
+      }
+    });
+
+    return;
+  }
+
+  /* =========================
      DRIVER — GET ORDERS
      GET /api/driver/orders
-  --------------------------- */
+  ========================= */
   if (pathname === '/api/driver/orders' && method === 'GET') {
     try {
-      const { rows } = await pool.query(`
+      const { rows } = await pool.query(
+        `
         SELECT
           id,
           pickup_address,
           delivery_address,
-          status
+          status,
+          created_at
         FROM orders
         ORDER BY created_at DESC
         LIMIT 25
-      `);
+        `
+      );
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(rows));
@@ -81,10 +136,10 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  /* ---------------------------
+  /* =========================
      DRIVER — UPDATE STATUS
      PUT /api/driver/orders/:id/status
-  --------------------------- */
+  ========================= */
   if (
     pathname.startsWith('/api/driver/orders/') &&
     pathname.endsWith('/status') &&
@@ -101,7 +156,7 @@ async function handleAPI(req, res, pool) {
 
         if (!status) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Status is required' }));
+          res.end(JSON.stringify({ error: 'status is required' }));
           return;
         }
 
@@ -110,25 +165,38 @@ async function handleAPI(req, res, pool) {
           UPDATE orders
           SET status = $1
           WHERE id = $2
-          RETURNING *
+          RETURNING
+            id,
+            pickup_address,
+            delivery_address,
+            status,
+            created_at
           `,
           [status, orderId]
         );
 
+        if (!rows.length) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Order not found' }));
+          return;
+        }
+
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(rows[0]));
+
       } catch (err) {
         console.error('[API] update status:', err.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Failed to update status' }));
       }
     });
+
     return;
   }
 
-  /* ---------------------------
+  /* =========================
      NOT FOUND
-  --------------------------- */
+  ========================= */
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Endpoint not found' }));
 }
