@@ -181,6 +181,80 @@ async function handleAPI(req, res, pool) {
 
     return;
   }
+  /* =========================
+     CUSTOMER — SCHEDULE ORDER
+     POST /api/schedule
+  ========================= */
+  if (pathname === '/api/schedule' && method === 'POST') {
+    let body = '';
+
+    req.on('data', chunk => (body += chunk));
+    req.on('end', async () => {
+      try {
+        const { order_id, scheduled_date, scheduled_time } = JSON.parse(body);
+
+        if (!order_id || !scheduled_date || !scheduled_time) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'order_id, scheduled_date, and scheduled_time are required',
+          }));
+          return;
+        }
+
+        // Ensure order exists and is confirmable
+        const { rows: existing } = await pool.query(
+          `
+          SELECT status
+          FROM orders
+          WHERE id = $1
+          `,
+          [order_id]
+        );
+
+        if (!existing.length) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Order not found' }));
+          return;
+        }
+
+        if (existing[0].status !== 'confirmed_pending_payment') {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'Order must be confirmed before scheduling',
+          }));
+          return;
+        }
+
+        // Update schedule + status
+        const { rows } = await pool.query(
+          `
+          UPDATE orders
+          SET
+            scheduled_date = $1,
+            scheduled_time = $2,
+            status = 'scheduled'
+          WHERE id = $3
+          RETURNING
+            id,
+            status,
+            scheduled_date,
+            scheduled_time
+          `,
+          [scheduled_date, scheduled_time, order_id]
+        );
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(rows[0]));
+
+      } catch (err) {
+        console.error('[API] schedule error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to schedule order' }));
+      }
+    });
+
+    return;
+  }
 
   /* =========================
      LEGACY / TEMP
