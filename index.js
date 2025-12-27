@@ -18,19 +18,51 @@ async function handleAPI(req, res, pool) {
      CORS
   ========================= */
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader(
-    'Access-Control-Allow-Methods',
-    'GET, POST, PUT, DELETE, OPTIONS'
-  );
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type'
-  );
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (method === 'OPTIONS') {
     res.writeHead(200);
     res.end();
     return;
+  }
+
+  /* =========================
+     SHARED PRICING LOGIC
+     (single source of truth)
+  ========================= */
+  function calculatePricing({
+    fragile = false,
+    priority = false,
+    sensitive = false,
+    timeSensitive = false,
+  }) {
+    const DISTANCE_MILES = 10; // placeholder (swap with Maps later)
+    const BASE_FEE = 25;
+    const RATE_PER_MILE = 2.25;
+
+    const mileageCost = DISTANCE_MILES * RATE_PER_MILE;
+
+    const total =
+      BASE_FEE +
+      mileageCost +
+      (fragile ? 10 : 0) +
+      (priority ? 15 : 0) +
+      (sensitive ? 12 : 0) +
+      (timeSensitive ? 20 : 0);
+
+    return {
+      distance_miles: Number(DISTANCE_MILES.toFixed(2)),
+      breakdown: {
+        base_fee: BASE_FEE,
+        mileage_cost: Number(mileageCost.toFixed(2)),
+        fragile_fee: fragile ? 10 : 0,
+        priority_fee: priority ? 15 : 0,
+        sensitive_fee: sensitive ? 12 : 0,
+        time_sensitive_fee: timeSensitive ? 20 : 0,
+      },
+      total: Number(total.toFixed(2)),
+    };
   }
 
   /* =========================
@@ -59,22 +91,16 @@ async function handleAPI(req, res, pool) {
   /* =========================
      CUSTOMER — PREVIEW QUOTE
      POST /api/quote
-     (15 minute expiry, no DB write)
+     (15 min expiry, no DB write)
   ========================= */
   if (pathname === '/api/quote' && method === 'POST') {
     let body = '';
 
     req.on('data', chunk => (body += chunk));
-    req.on('end', async () => {
+    req.on('end', () => {
       try {
-        const {
-          pickup_address,
-          delivery_address,
-          fragile = false,
-          priority = false,
-          sensitive = false,
-          timeSensitive = false,
-        } = JSON.parse(body);
+        const payload = JSON.parse(body);
+        const { pickup_address, delivery_address } = payload;
 
         if (!pickup_address || !delivery_address) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -84,42 +110,15 @@ async function handleAPI(req, res, pool) {
           return;
         }
 
-        /* -------------------------
-           TEMP distance + pricing
-           (preview-only, centralized)
-        ------------------------- */
-        const DISTANCE_MILES = 10; // placeholder (replace later)
-        const BASE_FEE = 25;
-        const RATE_PER_MILE = 2.25;
-
-        const mileageCost = DISTANCE_MILES * RATE_PER_MILE;
-
-        const total =
-          BASE_FEE +
-          mileageCost +
-          (fragile ? 10 : 0) +
-          (priority ? 15 : 0) +
-          (sensitive ? 12 : 0) +
-          (timeSensitive ? 20 : 0);
-
+        const pricing = calculatePricing(payload);
         const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           quote_id: crypto.randomUUID(),
-          distance_miles: Number(DISTANCE_MILES.toFixed(2)),
-          breakdown: {
-            base_fee: BASE_FEE,
-            mileage_cost: Number(mileageCost.toFixed(2)),
-            fragile_fee: fragile ? 10 : 0,
-            priority_fee: priority ? 15 : 0,
-            sensitive_fee: sensitive ? 12 : 0,
-            time_sensitive_fee: timeSensitive ? 20 : 0,
-          },
-          total: Number(total.toFixed(2)),
+          ...pricing,
           expires_at: expiresAt.toISOString(),
         }));
-
       } catch (err) {
         console.error('[API] quote error:', err.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -131,8 +130,63 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
+     CUSTOMER — CONFIRM QUOTE
+     POST /api/confirm
+     (recalculate + create order)
+  ========================= */
+  if (pathname === '/api/confirm' && method === 'POST') {
+    let body = '';
+
+    req.on('data', chunk => (body += chunk));
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body);
+        const { quote_id, pickup_address, delivery_address } = payload;
+
+        if (!quote_id || !pickup_address || !delivery_address) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'quote_id, pickup_address, and delivery_address are required',
+          }));
+          return;
+        }
+
+        const pricing = calculatePricing(payload);
+
+        const { rows } = await pool.query(
+          `
+          INSERT INTO orders (
+            pickup_address,
+            delivery_address,
+            status
+          )
+          VALUES ($1, $2, 'confirmed_pending_payment')
+          RETURNING id, status, created_at
+          `,
+          [pickup_address, delivery_address]
+        );
+
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          order_id: rows[0].id,
+          status: rows[0].status,
+          total: pricing.total,
+        }));
+      } catch (err) {
+        console.error('[API] confirm error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to confirm quote' }));
+      }
+    });
+
+    return;
+  }
+
+  /* =========================
+     LEGACY / TEMP
      CUSTOMER — CREATE ORDER
      POST /api/orders
+     (kept for backward compatibility)
   ========================= */
   if (pathname === '/api/orders' && method === 'POST') {
     let body = '';
@@ -158,19 +212,13 @@ async function handleAPI(req, res, pool) {
             status
           )
           VALUES ($1, $2, 'new')
-          RETURNING
-            id,
-            pickup_address,
-            delivery_address,
-            status,
-            created_at
+          RETURNING id, pickup_address, delivery_address, status, created_at
           `,
           [pickup_address, delivery_address]
         );
 
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(rows[0]));
-
       } catch (err) {
         console.error('[API] create order:', err.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -189,12 +237,7 @@ async function handleAPI(req, res, pool) {
     try {
       const { rows } = await pool.query(
         `
-        SELECT
-          id,
-          pickup_address,
-          delivery_address,
-          status,
-          created_at
+        SELECT id, pickup_address, delivery_address, status, created_at
         FROM orders
         ORDER BY created_at DESC
         LIMIT 25
@@ -221,7 +264,7 @@ async function handleAPI(req, res, pool) {
     method === 'PUT'
   ) {
     const parts = pathname.split('/');
-    const orderId = parts[4]; // /api/driver/orders/:id/status
+    const orderId = parts[4];
 
     let body = '';
     req.on('data', chunk => (body += chunk));
@@ -240,12 +283,7 @@ async function handleAPI(req, res, pool) {
           UPDATE orders
           SET status = $1
           WHERE id = $2
-          RETURNING
-            id,
-            pickup_address,
-            delivery_address,
-            status,
-            created_at
+          RETURNING id, pickup_address, delivery_address, status, created_at
           `,
           [status, orderId]
         );
@@ -258,7 +296,6 @@ async function handleAPI(req, res, pool) {
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(rows[0]));
-
       } catch (err) {
         console.error('[API] update status:', err.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
