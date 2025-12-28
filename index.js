@@ -28,43 +28,6 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
-     SHARED PRICING LOGIC
-  ========================= */
-  function calculatePricing({
-    fragile = false,
-    priority = false,
-    sensitive = false,
-    timeSensitive = false,
-  }) {
-    const DISTANCE_MILES = 10;
-    const BASE_FEE = 25;
-    const RATE_PER_MILE = 2.25;
-
-    const mileageCost = DISTANCE_MILES * RATE_PER_MILE;
-
-    const total =
-      BASE_FEE +
-      mileageCost +
-      (fragile ? 10 : 0) +
-      (priority ? 15 : 0) +
-      (sensitive ? 12 : 0) +
-      (timeSensitive ? 20 : 0);
-
-    return {
-      distance_miles: DISTANCE_MILES,
-      breakdown: {
-        base_fee: BASE_FEE,
-        mileage_cost: mileageCost,
-        fragile_fee: fragile ? 10 : 0,
-        priority_fee: priority ? 15 : 0,
-        sensitive_fee: sensitive ? 12 : 0,
-        time_sensitive_fee: timeSensitive ? 20 : 0,
-      },
-      total,
-    };
-  }
-
-  /* =========================
      HEALTH CHECK
   ========================= */
   if (pathname === '/api/health' && method === 'GET') {
@@ -75,37 +38,126 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
-     QUOTE
+     QUOTE (USES pricing_config)
   ========================= */
   if (pathname === '/api/quote' && method === 'POST') {
     let body = '';
     req.on('data', c => (body += c));
-    req.on('end', () => {
-      const pricing = calculatePricing(JSON.parse(body));
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        quote_id: crypto.randomUUID(),
-        ...pricing,
-        expires_at: new Date(Date.now() + 15 * 60 * 1000),
-      }));
+    req.on('end', async () => {
+      try {
+        const {
+          service_type,
+          region,
+          vehicle_type,
+          distance_miles = 0,
+          fragile = false,
+          priority = false,
+          signatures = 0
+        } = JSON.parse(body);
+
+        if (!service_type || !region) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'service_type and region required' }));
+          return;
+        }
+
+        let pricingQuery;
+        let params;
+
+        if (service_type === 'courier') {
+          pricingQuery = `
+            SELECT *
+            FROM pricing_config
+            WHERE service_type='courier'
+              AND region=$1
+              AND vehicle_type=$2
+              AND active=true
+            LIMIT 1
+          `;
+          params = [region, vehicle_type];
+        } else if (service_type === 'mobile_notary') {
+          pricingQuery = `
+            SELECT *
+            FROM pricing_config
+            WHERE service_type='mobile_notary'
+              AND region=$1
+              AND active=true
+            LIMIT 1
+          `;
+          params = [region];
+        } else {
+          throw new Error('Invalid service_type');
+        }
+
+        const { rows } = await pool.query(pricingQuery, params);
+        if (!rows.length) throw new Error('No pricing config found');
+
+        const p = rows[0];
+        let breakdown = {};
+        let total = 0;
+
+        if (service_type === 'courier') {
+          breakdown.base = Number(p.base_rate || 0);
+          breakdown.mileage = Number(p.per_mile_rate || 0) * distance_miles;
+          breakdown.fragile = fragile ? Number(p.fragile_fee || 0) : 0;
+          breakdown.priority = priority ? Number(p.priority_fee || 0) : 0;
+
+          total =
+            breakdown.base +
+            breakdown.mileage +
+            breakdown.fragile +
+            breakdown.priority;
+        }
+
+        if (service_type === 'mobile_notary') {
+          breakdown.base = Number(p.base_rate || 0);
+          breakdown.travel = Number(p.notary_travel_fee || 0);
+          breakdown.signatures =
+            Number(p.notary_per_signature_fee || 0) * signatures;
+          breakdown.convenience = Number(p.notary_convenience_fee || 0);
+          breakdown.priority = priority ? Number(p.priority_fee || 0) : 0;
+
+          total =
+            breakdown.base +
+            breakdown.travel +
+            breakdown.signatures +
+            breakdown.convenience +
+            breakdown.priority;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          quote_id: crypto.randomUUID(),
+          service_type,
+          region,
+          breakdown,
+          total: Number(total.toFixed(2)),
+          expires_at: new Date(Date.now() + 15 * 60 * 1000)
+        }));
+
+      } catch (err) {
+        console.error('[API] quote error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
     });
     return;
   }
 
   /* =========================
-     CONFIRM
+     CONFIRM ORDER
   ========================= */
   if (pathname === '/api/confirm' && method === 'POST') {
     let body = '';
     req.on('data', c => (body += c));
     req.on('end', async () => {
-      const { pickup_address, delivery_address } = JSON.parse(body);
+      const { pickup_address, delivery_address, service_type, total } = JSON.parse(body);
 
       const { rows } = await pool.query(
-        `INSERT INTO orders (pickup_address, delivery_address, status)
-         VALUES ($1,$2,'confirmed_pending_payment')
+        `INSERT INTO orders (pickup_address, delivery_address, service_type, total_amount, status)
+         VALUES ($1,$2,$3,$4,'confirmed_pending_payment')
          RETURNING id`,
-        [pickup_address, delivery_address]
+        [pickup_address, delivery_address, service_type, total]
       );
 
       res.writeHead(201, { 'Content-Type': 'application/json' });
@@ -140,35 +192,26 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
-     PAY (Stripe — SAFE)
+     PAY (STRIPE)
   ========================= */
   if (pathname === '/api/pay' && method === 'POST') {
     let body = '';
     req.on('data', c => (body += c));
     req.on('end', async () => {
       try {
-        if (!process.env.STRIPE_SECRET_KEY) {
-          throw new Error('STRIPE_SECRET_KEY missing');
-        }
-        if (!process.env.STRIPE_SUCCESS_URL || !process.env.STRIPE_CANCEL_URL) {
-          throw new Error('Stripe redirect URLs missing');
-        }
-
         const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
         const { order_id } = JSON.parse(body);
 
         const { rows } = await pool.query(
-          `SELECT status FROM orders WHERE id=$1`,
+          `SELECT total_amount FROM orders WHERE id=$1 AND status='scheduled'`,
           [order_id]
         );
 
-        if (!rows.length || rows[0].status !== 'scheduled') {
+        if (!rows.length) {
           res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Order not schedulable for payment' }));
+          res.end(JSON.stringify({ error: 'Order not ready for payment' }));
           return;
         }
-
-        const pricing = calculatePricing({});
 
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
@@ -176,13 +219,13 @@ async function handleAPI(req, res, pool) {
           line_items: [{
             price_data: {
               currency: 'usd',
-              product_data: { name: 'Courier Delivery Service' },
-              unit_amount: Math.round(pricing.total * 100),
+              product_data: { name: 'Smiles in Route Service' },
+              unit_amount: Math.round(Number(rows[0].total_amount) * 100)
             },
-            quantity: 1,
+            quantity: 1
           }],
           success_url: process.env.STRIPE_SUCCESS_URL,
-          cancel_url: process.env.STRIPE_CANCEL_URL,
+          cancel_url: process.env.STRIPE_CANCEL_URL
         });
 
         await pool.query(
