@@ -1,6 +1,5 @@
 ﻿const url = require('url');
 const crypto = require('crypto');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { sendPaymentEmail } = require('./src/email/sendPaymentEmail');
 
 /*
@@ -43,7 +42,7 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
-     QUOTE (pricing_config)
+     QUOTE
   ========================= */
   if (pathname === '/api/quote' && method === 'POST') {
     let body = '';
@@ -91,25 +90,26 @@ async function handleAPI(req, res, pool) {
         if (!rows.length) throw new Error('Pricing not configured');
 
         const p = rows[0];
-        let breakdown = {};
+        const breakdown = {};
         let total = 0;
 
         if (service_type === 'courier') {
           breakdown.base = Number(p.base_rate || 0);
-          breakdown.mileage = Number(p.per_mile_rate || 0) * distance_miles;
+          breakdown.mileage = Number(p.per_mile_rate || 0) * Number(distance_miles);
           breakdown.fragile = fragile ? Number(p.fragile_fee || 0) : 0;
           breakdown.priority = priority ? Number(p.priority_fee || 0) : 0;
-          total = Object.values(breakdown).reduce((a, b) => a + b, 0);
         }
 
         if (service_type === 'mobile_notary') {
           breakdown.base = Number(p.base_rate || 0);
           breakdown.travel = Number(p.notary_travel_fee || 0);
-          breakdown.signatures = Number(p.notary_per_signature_fee || 0) * signatures;
+          breakdown.signatures =
+            Number(p.notary_per_signature_fee || 0) * Number(signatures);
           breakdown.convenience = Number(p.notary_convenience_fee || 0);
           breakdown.priority = priority ? Number(p.priority_fee || 0) : 0;
-          total = Object.values(breakdown).reduce((a, b) => a + b, 0);
         }
+
+        total = Object.values(breakdown).reduce((a, b) => a + b, 0);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -121,6 +121,7 @@ async function handleAPI(req, res, pool) {
           expires_at: new Date(Date.now() + 15 * 60 * 1000)
         }));
       } catch (err) {
+        console.error('[API] quote error:', err.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
@@ -129,40 +130,42 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
-     CONFIRM
+     CONFIRM ORDER
   ========================= */
   if (pathname === '/api/confirm' && method === 'POST') {
     let body = '';
     req.on('data', c => (body += c));
     req.on('end', async () => {
-      const {
-        pickup_address,
-        delivery_address,
-        service_type,
-        total_amount,
-        customer_email,
-        distance_miles
-      } = JSON.parse(body);
-
-      const { rows } = await pool.query(
-        `
-        INSERT INTO orders (
+      try {
+        const {
           pickup_address,
           delivery_address,
           service_type,
-          total_amount,
-          customer_email,
-          distance_miles,
-          status
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,'confirmed_pending_payment')
-        RETURNING id, status
-        `,
-        [pickup_address, delivery_address, service_type, total_amount, customer_email, distance_miles]
-      );
+          total_amount
+        } = JSON.parse(body);
 
-      res.writeHead(201, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(rows[0]));
+        const { rows } = await pool.query(
+          `
+          INSERT INTO orders (
+            pickup_address,
+            delivery_address,
+            service_type,
+            total_amount,
+            status
+          )
+          VALUES ($1,$2,$3,$4,'confirmed_pending_payment')
+          RETURNING id, status
+          `,
+          [pickup_address, delivery_address, service_type, total_amount]
+        );
+
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(rows[0]));
+      } catch (err) {
+        console.error('[API] confirm error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
     });
     return;
   }
@@ -201,60 +204,68 @@ async function handleAPI(req, res, pool) {
     let body = '';
     req.on('data', c => (body += c));
     req.on('end', async () => {
-      const { order_id } = JSON.parse(body);
+      try {
+        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+        const { order_id } = JSON.parse(body);
 
-      const { rows } = await pool.query(
-        `
-        SELECT *
-        FROM orders
-        WHERE id=$1 AND status='scheduled'
-        `,
-        [order_id]
-      );
+        const { rows } = await pool.query(
+          `SELECT * FROM orders WHERE id=$1 AND status='scheduled'`,
+          [order_id]
+        );
 
-      if (!rows.length) {
-        res.writeHead(409, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Order not ready for payment' }));
-        return;
+        if (!rows.length) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Order not ready for payment' }));
+          return;
+        }
+
+        const o = rows[0];
+
+        const session = await stripe.checkout.sessions.create({
+          mode: 'payment',
+          payment_method_types: ['card'],
+          line_items: [{
+            price_data: {
+              currency: 'usd',
+              product_data: { name: 'Smiles in Route Service' },
+              unit_amount: Math.round(Number(o.total_amount) * 100)
+            },
+            quantity: 1
+          }],
+          success_url: process.env.STRIPE_SUCCESS_URL,
+          cancel_url: process.env.STRIPE_CANCEL_URL
+        });
+
+        await pool.query(
+          `UPDATE orders SET status='payment_pending' WHERE id=$1`,
+          [order_id]
+        );
+
+        // Email failure should NOT block payment
+        try {
+          await sendPaymentEmail({
+            to: o.customer_email || process.env.EMAIL_FROM,
+            customerName: 'Customer',
+            serviceType: o.service_type,
+            pickup: o.pickup_address,
+            delivery: o.delivery_address,
+            date: o.scheduled_date,
+            time: o.scheduled_time,
+            distance: o.distance_miles || '—',
+            total: o.total_amount,
+            checkoutUrl: session.url
+          });
+        } catch (emailErr) {
+          console.warn('[EMAIL] failed:', emailErr.message);
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ checkout_url: session.url }));
+      } catch (err) {
+        console.error('[API] pay error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
       }
-
-      const o = rows[0];
-
-      const session = await stripe.checkout.sessions.create({
-        mode: 'payment',
-        payment_method_types: ['card'],
-        line_items: [{
-          price_data: {
-            currency: 'usd',
-            product_data: { name: 'Smiles in Route Service' },
-            unit_amount: Math.round(Number(o.total_amount) * 100)
-          },
-          quantity: 1
-        }],
-        success_url: process.env.STRIPE_SUCCESS_URL,
-        cancel_url: process.env.STRIPE_CANCEL_URL
-      });
-
-      await pool.query(
-        `UPDATE orders SET status='payment_pending' WHERE id=$1`,
-        [order_id]
-      );
-
-      await sendPaymentEmail({
-        to: o.customer_email,
-        customerName: 'Customer',
-        serviceType: o.service_type,
-        pickup: o.pickup_address,
-        delivery: o.delivery_address,
-        date: o.scheduled_date,
-        time: o.scheduled_time,
-        distance: o.distance_miles,
-        total: o.total_amount,
-        checkoutUrl: session.url
-      });
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ checkout_url: session.url }));
     });
     return;
   }
