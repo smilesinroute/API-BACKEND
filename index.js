@@ -62,8 +62,7 @@ async function handleAPI(req, res, pool) {
           signatures = 0
         } = JSON.parse(body);
 
-        let sql;
-        let params;
+        let sql, params;
 
         if (service_type === 'courier') {
           sql = `
@@ -222,9 +221,7 @@ async function handleAPI(req, res, pool) {
     req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
       try {
-        const stripe = require('stripe')(
-          process.env.STRIPE_SECRET_KEY
-        );
+        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
         const { order_id } = JSON.parse(body);
 
         const { rows } = await pool.query(
@@ -239,9 +236,7 @@ async function handleAPI(req, res, pool) {
 
         if (!rows.length) {
           res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify({ error: 'Order not ready for payment' })
-          );
+          res.end(JSON.stringify({ error: 'Order not ready for payment' }));
           return;
         }
 
@@ -250,16 +245,18 @@ async function handleAPI(req, res, pool) {
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
           payment_method_types: ['card'],
+
+          // 🔑 REQUIRED FOR WEBHOOKS
+          metadata: {
+            order_id: o.id
+          },
+
           line_items: [
             {
               price_data: {
                 currency: 'usd',
-                product_data: {
-                  name: 'Smiles in Route Service'
-                },
-                unit_amount: Math.round(
-                  Number(o.total_amount) * 100
-                )
+                product_data: { name: 'Smiles in Route Service' },
+                unit_amount: Math.round(Number(o.total_amount) * 100)
               },
               quantity: 1
             }
