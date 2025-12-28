@@ -31,14 +31,19 @@ async function handleAPI(req, res, pool) {
      HEALTH CHECK
   ========================= */
   if (pathname === '/api/health' && method === 'GET') {
-    await pool.query('SELECT 1');
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok' }));
+    try {
+      await pool.query('SELECT 1');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+    } catch {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'db_error' }));
+    }
     return;
   }
 
   /* =========================
-     QUOTE (USES pricing_config)
+     QUOTE (pricing_config)
   ========================= */
   if (pathname === '/api/quote' && method === 'POST') {
     let body = '';
@@ -57,15 +62,15 @@ async function handleAPI(req, res, pool) {
 
         if (!service_type || !region) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'service_type and region required' }));
+          res.end(JSON.stringify({ error: 'service_type and region are required' }));
           return;
         }
 
-        let pricingQuery;
+        let pricingSQL;
         let params;
 
         if (service_type === 'courier') {
-          pricingQuery = `
+          pricingSQL = `
             SELECT *
             FROM pricing_config
             WHERE service_type='courier'
@@ -76,7 +81,7 @@ async function handleAPI(req, res, pool) {
           `;
           params = [region, vehicle_type];
         } else if (service_type === 'mobile_notary') {
-          pricingQuery = `
+          pricingSQL = `
             SELECT *
             FROM pricing_config
             WHERE service_type='mobile_notary'
@@ -89,8 +94,8 @@ async function handleAPI(req, res, pool) {
           throw new Error('Invalid service_type');
         }
 
-        const { rows } = await pool.query(pricingQuery, params);
-        if (!rows.length) throw new Error('No pricing config found');
+        const { rows } = await pool.query(pricingSQL, params);
+        if (!rows.length) throw new Error('Pricing not configured');
 
         const p = rows[0];
         let breakdown = {};
@@ -151,13 +156,28 @@ async function handleAPI(req, res, pool) {
     let body = '';
     req.on('data', c => (body += c));
     req.on('end', async () => {
-      const { pickup_address, delivery_address, service_type, total } = JSON.parse(body);
+      const {
+        pickup_address,
+        delivery_address,
+        service_type,
+        total_amount,
+        email
+      } = JSON.parse(body);
 
       const { rows } = await pool.query(
-        `INSERT INTO orders (pickup_address, delivery_address, service_type, total_amount, status)
-         VALUES ($1,$2,$3,$4,'confirmed_pending_payment')
-         RETURNING id`,
-        [pickup_address, delivery_address, service_type, total]
+        `
+        INSERT INTO orders (
+          pickup_address,
+          delivery_address,
+          service_type,
+          total_amount,
+          email,
+          status
+        )
+        VALUES ($1,$2,$3,$4,$5,'confirmed_pending_payment')
+        RETURNING id
+        `,
+        [pickup_address, delivery_address, service_type, total_amount, email]
       );
 
       res.writeHead(201, { 'Content-Type': 'application/json' });
@@ -176,12 +196,14 @@ async function handleAPI(req, res, pool) {
       const { order_id, scheduled_date, scheduled_time } = JSON.parse(body);
 
       const { rows } = await pool.query(
-        `UPDATE orders
-         SET scheduled_date=$1,
-             scheduled_time=$2,
-             status='scheduled'
-         WHERE id=$3
-         RETURNING id, status, scheduled_date, scheduled_time`,
+        `
+        UPDATE orders
+        SET scheduled_date=$1,
+            scheduled_time=$2,
+            status='scheduled'
+        WHERE id=$3
+        RETURNING id, status, scheduled_date, scheduled_time
+        `,
         [scheduled_date, scheduled_time, order_id]
       );
 
@@ -192,7 +214,7 @@ async function handleAPI(req, res, pool) {
   }
 
   /* =========================
-     PAY (STRIPE)
+     PAY (Stripe)
   ========================= */
   if (pathname === '/api/pay' && method === 'POST') {
     let body = '';
@@ -203,7 +225,11 @@ async function handleAPI(req, res, pool) {
         const { order_id } = JSON.parse(body);
 
         const { rows } = await pool.query(
-          `SELECT total_amount FROM orders WHERE id=$1 AND status='scheduled'`,
+          `
+          SELECT total_amount
+          FROM orders
+          WHERE id=$1 AND status='scheduled'
+          `,
           [order_id]
         );
 
@@ -257,8 +283,11 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  res.writeHead(404);
-  res.end(JSON.stringify({ error: 'Not found' }));
+  /* =========================
+     FALLBACK
+  ========================= */
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Endpoint not found' }));
 }
 
 module.exports = { handleAPI };
