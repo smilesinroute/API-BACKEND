@@ -17,7 +17,10 @@ async function handleAPI(req, res, pool) {
      CORS
   ========================= */
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET, POST, PUT, DELETE, OPTIONS'
+  );
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (method === 'OPTIONS') {
@@ -46,7 +49,7 @@ async function handleAPI(req, res, pool) {
   ========================= */
   if (pathname === '/api/quote' && method === 'POST') {
     let body = '';
-    req.on('data', c => (body += c));
+    req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
       try {
         const {
@@ -59,16 +62,17 @@ async function handleAPI(req, res, pool) {
           signatures = 0
         } = JSON.parse(body);
 
-        let sql, params;
+        let sql;
+        let params;
 
         if (service_type === 'courier') {
           sql = `
             SELECT *
             FROM pricing_config
-            WHERE service_type='courier'
-              AND region=$1
-              AND vehicle_type=$2
-              AND active=true
+            WHERE service_type = 'courier'
+              AND region = $1
+              AND vehicle_type = $2
+              AND active = true
             LIMIT 1
           `;
           params = [region, vehicle_type];
@@ -76,9 +80,9 @@ async function handleAPI(req, res, pool) {
           sql = `
             SELECT *
             FROM pricing_config
-            WHERE service_type='mobile_notary'
-              AND region=$1
-              AND active=true
+            WHERE service_type = 'mobile_notary'
+              AND region = $1
+              AND active = true
             LIMIT 1
           `;
           params = [region];
@@ -87,15 +91,17 @@ async function handleAPI(req, res, pool) {
         }
 
         const { rows } = await pool.query(sql, params);
-        if (!rows.length) throw new Error('Pricing not configured');
+        if (!rows.length) {
+          throw new Error('Pricing not configured');
+        }
 
         const p = rows[0];
         const breakdown = {};
-        let total = 0;
 
         if (service_type === 'courier') {
           breakdown.base = Number(p.base_rate || 0);
-          breakdown.mileage = Number(p.per_mile_rate || 0) * Number(distance_miles);
+          breakdown.mileage =
+            Number(p.per_mile_rate || 0) * Number(distance_miles);
           breakdown.fragile = fragile ? Number(p.fragile_fee || 0) : 0;
           breakdown.priority = priority ? Number(p.priority_fee || 0) : 0;
         }
@@ -109,17 +115,22 @@ async function handleAPI(req, res, pool) {
           breakdown.priority = priority ? Number(p.priority_fee || 0) : 0;
         }
 
-        total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+        const total = Object.values(breakdown).reduce(
+          (sum, v) => sum + v,
+          0
+        );
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          quote_id: crypto.randomUUID(),
-          service_type,
-          region,
-          breakdown,
-          total: Number(total.toFixed(2)),
-          expires_at: new Date(Date.now() + 15 * 60 * 1000)
-        }));
+        res.end(
+          JSON.stringify({
+            quote_id: crypto.randomUUID(),
+            service_type,
+            region,
+            breakdown,
+            total: Number(total.toFixed(2)),
+            expires_at: new Date(Date.now() + 15 * 60 * 1000)
+          })
+        );
       } catch (err) {
         console.error('[API] quote error:', err.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -134,7 +145,7 @@ async function handleAPI(req, res, pool) {
   ========================= */
   if (pathname === '/api/confirm' && method === 'POST') {
     let body = '';
-    req.on('data', c => (body += c));
+    req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
       try {
         const {
@@ -153,7 +164,7 @@ async function handleAPI(req, res, pool) {
             total_amount,
             status
           )
-          VALUES ($1,$2,$3,$4,'confirmed_pending_payment')
+          VALUES ($1, $2, $3, $4, 'confirmed_pending_payment')
           RETURNING id, status
           `,
           [pickup_address, delivery_address, service_type, total_amount]
@@ -175,24 +186,30 @@ async function handleAPI(req, res, pool) {
   ========================= */
   if (pathname === '/api/schedule' && method === 'POST') {
     let body = '';
-    req.on('data', c => (body += c));
+    req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
-      const { order_id, scheduled_date, scheduled_time } = JSON.parse(body);
+      try {
+        const { order_id, scheduled_date, scheduled_time } = JSON.parse(body);
 
-      const { rows } = await pool.query(
-        `
-        UPDATE orders
-        SET scheduled_date=$1,
-            scheduled_time=$2,
-            status='scheduled'
-        WHERE id=$3
-        RETURNING *
-        `,
-        [scheduled_date, scheduled_time, order_id]
-      );
+        const { rows } = await pool.query(
+          `
+          UPDATE orders
+          SET scheduled_date = $1,
+              scheduled_time = $2,
+              status = 'scheduled'
+          WHERE id = $3
+          RETURNING *
+          `,
+          [scheduled_date, scheduled_time, order_id]
+        );
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(rows[0]));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(rows[0]));
+      } catch (err) {
+        console.error('[API] schedule error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
     });
     return;
   }
@@ -202,20 +219,29 @@ async function handleAPI(req, res, pool) {
   ========================= */
   if (pathname === '/api/pay' && method === 'POST') {
     let body = '';
-    req.on('data', c => (body += c));
+    req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
       try {
-        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+        const stripe = require('stripe')(
+          process.env.STRIPE_SECRET_KEY
+        );
         const { order_id } = JSON.parse(body);
 
         const { rows } = await pool.query(
-          `SELECT * FROM orders WHERE id=$1 AND status='scheduled'`,
+          `
+          SELECT *
+          FROM orders
+          WHERE id = $1
+            AND status = 'scheduled'
+          `,
           [order_id]
         );
 
         if (!rows.length) {
           res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Order not ready for payment' }));
+          res.end(
+            JSON.stringify({ error: 'Order not ready for payment' })
+          );
           return;
         }
 
@@ -224,24 +250,30 @@ async function handleAPI(req, res, pool) {
         const session = await stripe.checkout.sessions.create({
           mode: 'payment',
           payment_method_types: ['card'],
-          line_items: [{
-            price_data: {
-              currency: 'usd',
-              product_data: { name: 'Smiles in Route Service' },
-              unit_amount: Math.round(Number(o.total_amount) * 100)
-            },
-            quantity: 1
-          }],
+          line_items: [
+            {
+              price_data: {
+                currency: 'usd',
+                product_data: {
+                  name: 'Smiles in Route Service'
+                },
+                unit_amount: Math.round(
+                  Number(o.total_amount) * 100
+                )
+              },
+              quantity: 1
+            }
+          ],
           success_url: process.env.STRIPE_SUCCESS_URL,
           cancel_url: process.env.STRIPE_CANCEL_URL
         });
 
         await pool.query(
-          `UPDATE orders SET status='payment_pending' WHERE id=$1`,
+          `UPDATE orders SET status = 'payment_pending' WHERE id = $1`,
           [order_id]
         );
 
-        // Email failure should NOT block payment
+        // Email failure must NOT block payment
         try {
           await sendPaymentEmail({
             to: o.customer_email || process.env.EMAIL_FROM,
@@ -270,7 +302,10 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
-  res.writeHead(404);
+  /* =========================
+     FALLBACK
+  ========================= */
+  res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Not found' }));
 }
 
