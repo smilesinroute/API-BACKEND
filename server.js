@@ -1,14 +1,23 @@
+/**
+ * Smiles in Route – API Server
+ * ---------------------------------------
+ * - Plain Node HTTP (no Express)
+ * - PostgreSQL via Supabase
+ * - Stripe webhook with RAW body support
+ */
+
 require('dotenv').config();
 const http = require('http');
 const { Pool } = require('pg');
+
 const { handleAPI } = require('./index');
 const { handleStripeWebhook } = require('./src/webhook/stripeWebhook');
 
 const PORT = process.env.PORT || 3000;
 
-/* ---------------------------
-   SUPABASE POSTGRES POOL
---------------------------- */
+/* ======================================================
+   SUPABASE POSTGRES CONNECTION POOL
+====================================================== */
 const pool = new Pool({
   host: process.env.PG_HOST,
   user: process.env.PG_USER,
@@ -21,28 +30,31 @@ const pool = new Pool({
   },
 });
 
-/* ---------------------------
-   SERVER
---------------------------- */
+/* ======================================================
+   HTTP SERVER
+====================================================== */
 const server = http.createServer((req, res) => {
   const { url, method } = req;
 
   /**
-   * IMPORTANT:
-   * Stripe requires the RAW body.
-   * This route must run BEFORE any body parsing.
+   * STRIPE WEBHOOK
+   * -----------------------------------
+   * MUST receive the raw request body.
+   * MUST be handled before any other logic.
    */
   if (url === '/api/webhook/stripe' && method === 'POST') {
-    handleStripeWebhook(req, res, pool);
-    return;
+    return handleStripeWebhook(req, res, pool);
   }
 
   /**
-   * All other API routes
+   * ALL OTHER API ROUTES
    */
-  handleAPI(req, res, pool);
+  return handleAPI(req, res, pool);
 });
 
+/* ======================================================
+   START SERVER
+====================================================== */
 server.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Smiles API running on port ${PORT}`);
   console.log(`📊 Health check: /api/health`);
