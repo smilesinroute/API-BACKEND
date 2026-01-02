@@ -44,7 +44,152 @@ async function handleAPI(req, res, pool) {
     return;
   }
 
+    /* =========================
+     DISPATCH APPROVE (create Stripe link + email)
+  ========================= */
+  if (pathname === '/api/dispatch/approve' && method === 'POST') {
+    let body = '';
+    req.on('data', chunk => (body += chunk));
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+
+        const order_id = payload.order_id;
+        const customer_email = payload.customer_email;
+        const total_amount = Number(payload.total_amount); // dollars
+        const service_type = payload.service_type || 'courier';
+        const pickup_address = payload.pickup_address || '';
+        const delivery_address = payload.delivery_address || '';
+
+        if (!order_id) throw new Error('order_id is required');
+        if (!customer_email) throw new Error('customer_email is required');
+        if (!Number.isFinite(total_amount) || total_amount <= 0) throw new Error('total_amount must be a number > 0');
+
+        const Stripe = require('stripe');
+        const stripeKey = (process.env.STRIPE_SECRET_KEY || '').trim();
+        if (!stripeKey) throw new Error('Missing STRIPE_SECRET_KEY on server');
+
+        const stripe = new Stripe(stripeKey, { apiVersion: '2024-06-20' });
+
+        const appOrigin =
+          (process.env.APP_ORIGIN || '').trim() ||
+          'https://precious-semolina-f8a3ce.netlify.app';
+
+        // Checkout Session (no pre-created price needed)
+        const session = await stripe.checkout.sessions.create({
+          mode: 'payment',
+          line_items: [
+            {
+              price_data: {
+                currency: 'usd',
+                unit_amount: Math.round(total_amount * 100),
+                product_data: {
+                  name: Smiles in Route -  Order,
+                  description: pickup_address && delivery_address
+                    ? Pickup:  | Dropoff: 
+                    : Order: 
+                }
+              },
+              quantity: 1
+            }
+          ],
+          metadata: { order_id, service_type },
+          success_url: ${appOrigin}/payment/success?order_id=,
+          cancel_url: ${appOrigin}/payment/cancel?order_id=
+        });
+
+        // Email customer
+        let emailed = false;
+        try {
+          const { sendMail } = require('./src/lib/mailer');
+          const link = session.url;
+          const subject = 'Payment link for your Smiles in Route order';
+          const text =
+Your order is approved by dispatch.
+
+Order ID: 
+Amount: -Raw{total_amount.toFixed(2)}
+
+Pay here: 
+;
+          await sendMail({ to: customer_email, subject, text });
+          emailed = true;
+        } catch (emailErr) {
+          console.error('[API] email send failed:', emailErr.message);
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          order_id,
+          payment_url: session.url,
+          session_id: session.id,
+          emailed
+        }));
+      } catch (err) {
+        console.error('[API] dispatch approve error:', err.message);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
   /* =========================
+     DISPATCH APPROVE (creates Stripe payment link)
+  ========================= */
+  if (pathname === '/api/dispatch/approve' && method === 'POST') {
+    let body = '';
+    req.on('data', chunk => (body += chunk));
+    req.on('end', async () => {
+      try {
+        const { order_id, customer_email, total_amount, service_type, pickup_address, delivery_address } = JSON.parse(body || '{}');
+
+        if (!order_id) throw new Error('order_id is required');
+        if (!customer_email) throw new Error('customer_email is required');
+        if (typeof total_amount !== 'number') throw new Error('total_amount must be a number');
+
+        const secret = (process.env.STRIPE_SECRET_KEY || '').trim();
+        if (!secret) throw new Error('Missing STRIPE_SECRET_KEY on server');
+
+        const stripe = require('stripe')(secret);
+
+        // Create a Checkout Session (simple + reliable)
+        const unit_amount = Math.round(total_amount * 100);
+
+        const success_url = (process.env.PAYMENT_SUCCESS_URL || 'https://example.com/success?session_id={CHECKOUT_SESSION_ID}');
+        const cancel_url  = (process.env.PAYMENT_CANCEL_URL  || 'https://example.com/cancel');
+
+        const session = await stripe.checkout.sessions.create({
+          mode: 'payment',
+          customer_email,
+          line_items: [
+            {
+              price_data: {
+                currency: 'usd',
+                product_data: {
+                  name: 'Smiles in Route - Dispatch Approved',
+                  description: \\ | \ -> \\.slice(0, 500),
+                },
+                unit_amount,
+              },
+              quantity: 1,
+            }
+          ],
+          metadata: { order_id },
+          success_url,
+          cancel_url,
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, order_id, checkout_url: session.url, session_id: session.id }));
+      } catch (err) {
+        console.error('[API] dispatch approve error:', err.message);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+/* =========================
      QUOTE
   ========================= */
   /* =========================
@@ -331,5 +476,7 @@ async function handleAPI(req, res, pool) {
 }
 
 module.exports = { handleAPI };
+
+
 
 
