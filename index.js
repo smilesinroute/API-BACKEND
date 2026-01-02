@@ -47,6 +47,30 @@ async function handleAPI(req, res, pool) {
   /* =========================
      QUOTE
   ========================= */
+  /* =========================
+     DISTANCE (server-side)
+  ========================= */
+  if (pathname === '/api/distance' && method === 'POST') {
+    let body = '';
+    req.on('data', chunk => (body += chunk));
+    req.on('end', async () => {
+      try {
+        const { pickup, delivery } = JSON.parse(body || '{}');
+        if (!pickup || !delivery) throw new Error('pickup and delivery are required');
+
+        const { getDistanceMiles } = require('./src/lib/distanceMatrix');
+        const distance_miles = await getDistanceMiles(pickup, delivery);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ distance_miles }));
+      } catch (err) {
+        console.error('[API] distance error:', err.message);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
   if (pathname === '/api/quote' && method === 'POST') {
     let body = '';
     req.on('data', chunk => (body += chunk));
@@ -142,7 +166,7 @@ async function handleAPI(req, res, pool) {
   /* =========================
      CONFIRM ORDER
   ========================= */
-  if (pathname === '/api/confirm' && method === 'POST') {
+  if ((pathname === '/api/confirm' || pathname === '/api/orders') && method === 'POST') {
     let body = '';
     req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
@@ -307,3 +331,5 @@ async function handleAPI(req, res, pool) {
 }
 
 module.exports = { handleAPI };
+
+

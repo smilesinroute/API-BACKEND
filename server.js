@@ -1,12 +1,12 @@
-/**
- * Smiles in Route – API Server
+﻿/**
+ * Smiles in Route â€“ API Server
  * ---------------------------------------
  * - Plain Node HTTP (no Express)
  * - PostgreSQL via Supabase
  * - Stripe webhook with RAW body support
  */
 
-require('dotenv').config();
+require('dotenv').config({ override: true });
 const http = require('http');
 const { Pool } = require('pg');
 
@@ -56,14 +56,15 @@ const server = http.createServer((req, res) => {
    START SERVER
 ====================================================== */
 server.listen(PORT, '0.0.0.0', async () => {
-  console.log(`🚀 Smiles API running on port ${PORT}`);
-  console.log(`📊 Health check: /api/health`);
-  console.log(`🔔 Stripe webhook: /api/webhook/stripe`);
+  console.log(`ðŸš€ Smiles API running on port ${PORT}`);
+  console.log(`ðŸ“Š Health check: /api/health`);
+  console.log(`ðŸ”” Stripe webhook: /api/webhook/stripe`);
 
   try {
     await pool.query('SELECT 1');
-    console.log('✅ Database connected (Supabase)');
+    console.log('âœ… Database connected (Supabase)');
   } catch (err) {
-    console.error('❌ Database connection failed:', err.message);
+    console.error('âŒ Database connection failed:', err.message);
   }
 });
+
