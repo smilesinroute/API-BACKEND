@@ -6,28 +6,17 @@ const crypto = require("crypto");
 /* =========================
    Helpers
 ========================= */
+
 function json(res, code, payload) {
-  res.writeHead(code, { "Content-Type": "application/json" });
+  res.statusCode = code;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(payload));
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk) => (body += chunk));
-    req.on("end", () => resolve(body));
-    req.on("error", reject);
-  });
-}
-
-async function readJson(req) {
-  const body = await readBody(req);
-  if (!body) return {};
-  try {
-    return JSON.parse(body);
-  } catch {
-    throw new Error("Invalid JSON body");
-  }
+function sendText(res, code, text) {
+  res.statusCode = code;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.end(text);
 }
 
 function isValidEmail(email) {
@@ -62,8 +51,57 @@ function assertFiniteNumber(n, label) {
   return num;
 }
 
+function asTrimmedString(v) {
+  return String(v ?? "").trim();
+}
+
+function asNullableTrimmedString(v) {
+  const s = asTrimmedString(v);
+  return s ? s : null;
+}
+
 /**
- * Insert order with optional columns (for safety if schema differs).
+ * Read body with a hard limit (prevents accidental huge payloads).
+ */
+function readBody(req, maxBytes = 1_000_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("Request body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+async function readJson(req) {
+  // Accept missing content-type, but if present and not json, fail.
+  const ct = String(req.headers["content-type"] || "");
+  if (ct && !ct.toLowerCase().includes("application/json")) {
+    throw new Error("Content-Type must be application/json");
+  }
+
+  const body = await readBody(req);
+  if (!body) return {};
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error("Invalid JSON body");
+  }
+}
+
+/**
+ * Insert order with optional columns (keeps API working if schema differs).
  * Returns { id, status }.
  */
 async function insertOrderSafe(pool, data) {
@@ -112,7 +150,7 @@ async function insertOrderSafe(pool, data) {
       ]
     );
     return rows[0];
-  } catch (e) {
+  } catch {
     // Fallback minimal insert
     const { rows } = await pool.query(
       `
@@ -207,48 +245,49 @@ async function sendDispatchPaymentEmailSafe({
 
 /* =========================
    API REQUEST HANDLER
-   - Plain Node HTTP (no Express)
-   - Uses pg pool from server.js
 ========================= */
+
 async function handleAPI(req, res, pool) {
   const { pathname } = url.parse(req.url, true);
   const method = req.method;
 
-  /* =========================
-     CORS
-  ========================= */
+  // CORS (keep permissive for now; tighten later behind Cloudflare)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
   if (method === "OPTIONS") {
-    res.writeHead(200);
-    res.end();
-    return;
+    res.statusCode = 204;
+    return res.end();
   }
 
-  /* =========================
-     HEALTH
-  ========================= */
+  // Optional: silence browser noise
+  if (pathname === "/favicon.ico") {
+    res.statusCode = 204;
+    return res.end();
+  }
+
+  // HEALTH
   if (pathname === "/api/health" && method === "GET") {
     try {
       await pool.query("SELECT 1");
       return json(res, 200, { status: "ok" });
-    } catch {
+    } catch (e) {
+      console.error("[API] health db_error:", e.message);
       return json(res, 500, { status: "db_error" });
     }
   }
 
-  /* =========================
-     DISTANCE (server-side)
-  ========================= */
+  // DISTANCE
   if (pathname === "/api/distance" && method === "POST") {
     try {
       const { pickup, delivery } = await readJson(req);
-      if (!pickup || !delivery) throw new Error("pickup and delivery are required");
+      const p = asTrimmedString(pickup);
+      const d = asTrimmedString(delivery);
+      if (!p || !d) throw new Error("pickup and delivery are required");
 
       const { getDistanceMiles } = require("./src/lib/distanceMatrix");
-      const distance_miles = await getDistanceMiles(pickup, delivery);
+      const distance_miles = await getDistanceMiles(p, d);
 
       return json(res, 200, { distance_miles });
     } catch (err) {
@@ -257,20 +296,18 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* =========================
-     QUOTE
-  ========================= */
+  // QUOTE
   if (pathname === "/api/quote" && method === "POST") {
     try {
-      const {
-        service_type,
-        region,
-        vehicle_type,
-        distance_miles = 0,
-        fragile = false,
-        priority = false,
-        signatures = 0,
-      } = await readJson(req);
+      const payload = await readJson(req);
+
+      const service_type = asTrimmedString(payload.service_type);
+      const region = asTrimmedString(payload.region);
+      const vehicle_type = asTrimmedString(payload.vehicle_type);
+      const distance_miles = payload.distance_miles ?? 0;
+      const fragile = Boolean(payload.fragile);
+      const priority = Boolean(payload.priority);
+      const signatures = payload.signatures ?? 0;
 
       let sql, params;
 
@@ -333,7 +370,7 @@ async function handleAPI(req, res, pool) {
         region,
         breakdown,
         total: Number(total.toFixed(2)),
-        expires_at: new Date(Date.now() + 15 * 60 * 1000),
+        expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
       });
     } catch (err) {
       console.error("[API] quote error:", err.message);
@@ -341,30 +378,30 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* =========================
-     CONFIRM ORDER (alias /api/orders)
-     - Creates order row
-     - Sends confirmation email (best-effort)
-  ========================= */
+  // CONFIRM ORDER (alias /api/orders)
   if ((pathname === "/api/confirm" || pathname === "/api/orders") && method === "POST") {
     try {
       const payload = await readJson(req);
 
-      const pickup_address = String(payload.pickup_address || "").trim();
-      const delivery_address = String(payload.delivery_address || "").trim();
-      const service_type = String(payload.service_type || "").trim();
+      const pickup_address = asTrimmedString(payload.pickup_address);
+      const delivery_address = asTrimmedString(payload.delivery_address);
+      const service_type = asTrimmedString(payload.service_type);
       const total_amount = assertFiniteNumber(payload.total_amount, "total_amount");
-      const customer_email = payload.customer_email ? String(payload.customer_email).trim() : "";
-      const distance_miles = payload.distance_miles !== undefined ? Number(payload.distance_miles) : null;
-      const scheduled_date = payload.scheduled_date ? String(payload.scheduled_date).trim() : null;
-      const scheduled_time = payload.scheduled_time ? String(payload.scheduled_time).trim() : null;
+
+      const customer_email = asTrimmedString(payload.customer_email);
+      const distance_miles =
+        payload.distance_miles !== undefined && payload.distance_miles !== null
+          ? Number(payload.distance_miles)
+          : null;
+
+      const scheduled_date = asNullableTrimmedString(payload.scheduled_date);
+      const scheduled_time = asNullableTrimmedString(payload.scheduled_time);
 
       if (!pickup_address || !delivery_address) throw new Error("pickup_address and delivery_address are required");
       if (!service_type) throw new Error("service_type is required");
       if (total_amount <= 0) throw new Error("total_amount must be > 0");
-      if (customer_email && !isValidEmail(customer_email)) {
-        throw new Error(`Invalid email address: ${customer_email}`);
-      }
+      if (customer_email && !isValidEmail(customer_email)) throw new Error(`Invalid email address: ${customer_email}`);
+      if (distance_miles !== null && !Number.isFinite(distance_miles)) throw new Error("distance_miles must be numeric");
 
       const created = await insertOrderSafe(pool, {
         pickup_address,
@@ -373,7 +410,7 @@ async function handleAPI(req, res, pool) {
         total_amount: Number(total_amount),
         status: "confirmed_pending_payment",
         customer_email: customer_email || null,
-        distance_miles: Number.isFinite(distance_miles) ? distance_miles : null,
+        distance_miles,
         scheduled_date,
         scheduled_time,
       });
@@ -396,25 +433,16 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* =========================
-     DISPATCH APPROVE
-     - Loads order from DB (source of truth)
-     - Requires correct status
-     - Creates Stripe Checkout session
-     - Persists stripe_session_id + stripe_checkout_url + payment_status='pending'
-     - Emails payment link (best-effort)
-  ========================= */
+  // DISPATCH APPROVE
   if (pathname === "/api/dispatch/approve" && method === "POST") {
-    // IMPORTANT: Everything except email should be consistent.
     const client = await pool.connect();
     try {
       const payload = await readJson(req);
-      const orderId = String(payload.order_id || "").trim();
+      const orderId = asTrimmedString(payload.order_id);
       if (!orderId) throw new Error("order_id is required");
 
       await client.query("BEGIN");
 
-      // Load order from DB (do NOT trust request body for amount/email/addresses)
       const { rows } = await client.query(
         `
         SELECT
@@ -439,24 +467,41 @@ async function handleAPI(req, res, pool) {
 
       const order = rows[0];
 
-      // Enforce lifecycle
       if (order.status !== "confirmed_pending_payment") {
         throw new Error(`Order status must be confirmed_pending_payment (current: ${order.status})`);
       }
-      if (order.stripe_session_id || order.stripe_checkout_url) {
-        throw new Error("Order already has a payment session (duplicate approval blocked)");
+
+      // If already has a session, return it instead of failing (idempotent)
+      if (order.stripe_session_id && order.stripe_checkout_url) {
+        await client.query("COMMIT");
+        const emailed = await sendDispatchPaymentEmailSafe({
+          to: String(order.customer_email || "").trim(),
+          orderId,
+          service_type: String(order.service_type || "courier"),
+          pickup_address: String(order.pickup_address || ""),
+          delivery_address: String(order.delivery_address || ""),
+          total_amount: Number(order.total_amount || 0),
+          checkoutUrl: String(order.stripe_checkout_url),
+        });
+
+        return json(res, 200, {
+          ok: true,
+          order_id: orderId,
+          payment_url: order.stripe_checkout_url,
+          session_id: order.stripe_session_id,
+          emailed,
+          reused_existing_session: true,
+        });
       }
 
       const customer_email = String(order.customer_email || "").trim();
-      if (!isValidEmail(customer_email)) {
-        throw new Error("Order is missing a valid customer_email");
-      }
+      if (!isValidEmail(customer_email)) throw new Error("Order is missing a valid customer_email");
 
       const total_amount = assertFiniteNumber(order.total_amount, "total_amount");
       if (total_amount <= 0) throw new Error("Order total_amount must be > 0");
 
       const Stripe = require("stripe");
-      const stripeKey = (process.env.STRIPE_SECRET_KEY || "").trim();
+      const stripeKey = asTrimmedString(process.env.STRIPE_SECRET_KEY);
       if (!stripeKey) throw new Error("Missing STRIPE_SECRET_KEY on server");
 
       const stripe = new Stripe(stripeKey, { apiVersion: "2024-06-20" });
@@ -490,7 +535,6 @@ async function handleAPI(req, res, pool) {
         cancel_url,
       });
 
-      // Persist Stripe session + set payment_status='pending' atomically
       await client.query(
         `
         UPDATE orders
@@ -505,7 +549,6 @@ async function handleAPI(req, res, pool) {
 
       await client.query("COMMIT");
 
-      // Email is best-effort AFTER commit
       const emailed = await sendDispatchPaymentEmailSafe({
         to: customer_email,
         orderId,
@@ -534,9 +577,6 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* =========================
-     FALLBACK
-  ========================= */
   return json(res, 404, { error: "Not found" });
 }
 
