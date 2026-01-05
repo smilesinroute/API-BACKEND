@@ -24,14 +24,29 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 }
 
+function asTrimmedString(v) {
+  return String(v ?? "").trim();
+}
+
+function asNullableTrimmedString(v) {
+  const s = asTrimmedString(v);
+  return s ? s : null;
+}
+
+function assertFiniteNumber(n, label) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) throw new Error(`${label} must be a number`);
+  return num;
+}
+
 function getAppOrigin() {
-  return (process.env.APP_ORIGIN || "").trim() || "http://127.0.0.1:5175";
+  return asTrimmedString(process.env.APP_ORIGIN) || "http://127.0.0.1:5175";
 }
 
 function buildRedirectUrls(orderId) {
   const origin = getAppOrigin();
-  const rawSuccess = (process.env.STRIPE_SUCCESS_URL || "").trim();
-  const rawCancel = (process.env.STRIPE_CANCEL_URL || "").trim();
+  const rawSuccess = asTrimmedString(process.env.STRIPE_SUCCESS_URL);
+  const rawCancel = asTrimmedString(process.env.STRIPE_CANCEL_URL);
   const oid = encodeURIComponent(String(orderId));
 
   const success_url = rawSuccess
@@ -45,21 +60,6 @@ function buildRedirectUrls(orderId) {
   return { success_url, cancel_url };
 }
 
-function assertFiniteNumber(n, label) {
-  const num = Number(n);
-  if (!Number.isFinite(num)) throw new Error(`${label} must be a number`);
-  return num;
-}
-
-function asTrimmedString(v) {
-  return String(v ?? "").trim();
-}
-
-function asNullableTrimmedString(v) {
-  const s = asTrimmedString(v);
-  return s ? s : null;
-}
-
 /**
  * Read body with a hard limit (prevents accidental huge payloads).
  */
@@ -67,24 +67,29 @@ function readBody(req, maxBytes = 1_000_000) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0;
+    let done = false;
+
+    function finish(err, data) {
+      if (done) return;
+      done = true;
+      err ? reject(err) : resolve(data);
+    }
 
     req.on("data", (chunk) => {
       total += chunk.length;
       if (total > maxBytes) {
-        reject(new Error("Request body too large"));
         req.destroy();
-        return;
+        return finish(new Error("Request body too large"));
       }
       chunks.push(chunk);
     });
 
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    req.on("end", () => finish(null, Buffer.concat(chunks).toString("utf8")));
+    req.on("error", (e) => finish(e));
   });
 }
 
 async function readJson(req) {
-  // Accept missing content-type, but if present and not json, fail.
   const ct = String(req.headers["content-type"] || "");
   if (ct && !ct.toLowerCase().includes("application/json")) {
     throw new Error("Content-Type must be application/json");
@@ -471,9 +476,10 @@ async function handleAPI(req, res, pool) {
         throw new Error(`Order status must be confirmed_pending_payment (current: ${order.status})`);
       }
 
-      // If already has a session, return it instead of failing (idempotent)
+      // Idempotent: if already has a session, reuse it.
       if (order.stripe_session_id && order.stripe_checkout_url) {
         await client.query("COMMIT");
+
         const emailed = await sendDispatchPaymentEmailSafe({
           to: String(order.customer_email || "").trim(),
           orderId,
@@ -575,6 +581,11 @@ async function handleAPI(req, res, pool) {
     } finally {
       client.release();
     }
+  }
+
+  // Fallback
+  if (pathname === "/" && method === "GET") {
+    return sendText(res, 200, "Smiles in Route API");
   }
 
   return json(res, 404, { error: "Not found" });
