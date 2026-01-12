@@ -1,4 +1,5 @@
 // apps/api/scheduling-server.js
+
 const express = require("express");
 const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
@@ -19,6 +20,64 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+/* =========================
+   Scheduling Business Rules
+========================= */
+const BUSINESS_RULES = {
+  delivery: {
+    weekday: { start: 8, end: 18 },
+    weekend: { start: 9, end: 17 },
+    slotMinutes: 30,
+    allowWeekends: true,
+    allowAfterHours: true,
+  },
+  notary: {
+    weekday: { start: 9, end: 17 },
+    weekend: null,
+    slotMinutes: 60,
+    allowWeekends: false,
+    allowAfterHours: false,
+  },
+};
+
+/* =========================
+   Helpers
+========================= */
+function isWeekend(dateStr) {
+  const day = new Date(dateStr + "T00:00:00").getDay();
+  return day === 0 || day === 6;
+}
+
+function isAfterHours(time, rules, weekend) {
+  const hour = Number(time.split(":")[0]);
+  const hours = weekend ? rules.weekend : rules.weekday;
+  if (!hours) return true;
+  return hour < hours.start || hour >= hours.end;
+}
+
+function generateTimeSlots(serviceType, date) {
+  const rules = BUSINESS_RULES[serviceType];
+  if (!rules) return [];
+
+  const weekend = isWeekend(date);
+  if (weekend && !rules.allowWeekends) return [];
+
+  const hours = weekend ? rules.weekend : rules.weekday;
+  if (!hours) return [];
+
+  const slots = [];
+
+  for (let h = hours.start; h < hours.end; h++) {
+    for (let m = 0; m < 60; m += rules.slotMinutes) {
+      slots.push(
+        `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
+      );
+    }
+  }
+
+  return slots;
+}
 
 /* =========================
    Health Check
@@ -50,7 +109,6 @@ router.get("/api/available-slots/:date", async (req, res) => {
         .neq("status", "cancelled");
 
       if (error) throw error;
-
       bookedTimes = (data || []).map((d) => d.delivery_time);
     }
 
@@ -63,13 +121,19 @@ router.get("/api/available-slots/:date", async (req, res) => {
         .neq("status", "cancelled");
 
       if (error) throw error;
-
       bookedTimes = (data || []).map((n) => n.appointment_time);
     }
 
-    const availableSlots = generateTimeSlots(serviceType).filter(
-      (slot) => !bookedTimes.includes(slot)
-    );
+    const rules = BUSINESS_RULES[serviceType];
+    const weekend = isWeekend(date);
+
+    const availableSlots = generateTimeSlots(serviceType, date)
+      .filter((slot) => !bookedTimes.includes(slot))
+      .map((slot) => ({
+        time: slot,
+        weekend,
+        after_hours: isAfterHours(slot, rules, weekend),
+      }));
 
     res.json({
       date,
@@ -100,6 +164,12 @@ router.post("/api/appointments", async (req, res) => {
   }
 
   try {
+    const rules = BUSINESS_RULES[serviceType];
+    if (!rules) throw new Error("Invalid serviceType");
+
+    const weekend = isWeekend(date);
+    const afterHours = isAfterHours(time, rules, weekend);
+
     /* ---------- DELIVERY ---------- */
     if (serviceType === "delivery") {
       const { error } = await supabase.from("deliveries").insert({
@@ -107,7 +177,6 @@ router.post("/api/appointments", async (req, res) => {
         delivery_time: time,
         status: "scheduled",
 
-        // REQUIRED NON-NULL FIELDS (SAFE PLACEHOLDERS)
         customer_name: "Scheduling Hold",
         customer_email: "pending@smilesinroute.delivery",
         customer_phone: "0000000000",
@@ -122,9 +191,9 @@ router.post("/api/appointments", async (req, res) => {
         fragile: false,
         priority: false,
         time_sensitive: false,
-        weekend: false,
+        weekend,
         holiday: false,
-        after_hours: false,
+        after_hours: afterHours,
       });
 
       if (error) throw error;
@@ -151,6 +220,8 @@ router.post("/api/appointments", async (req, res) => {
       serviceType,
       date,
       time,
+      weekend,
+      after_hours: afterHours,
     });
   } catch (err) {
     console.error("❌ create appointment error:", err);
@@ -160,26 +231,5 @@ router.post("/api/appointments", async (req, res) => {
     });
   }
 });
-
-/* ======================================================
-   Slot Generator
-====================================================== */
-function generateTimeSlots(serviceType) {
-  const slots = [];
-
-  const startHour = serviceType === "notary" ? 9 : 8;
-  const endHour = serviceType === "notary" ? 17 : 18;
-  const intervalMinutes = serviceType === "notary" ? 60 : 30;
-
-  for (let h = startHour; h < endHour; h++) {
-    for (let m = 0; m < 60; m += intervalMinutes) {
-      slots.push(
-        `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
-      );
-    }
-  }
-
-  return slots;
-}
 
 module.exports = router;
