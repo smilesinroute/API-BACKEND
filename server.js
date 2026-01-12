@@ -11,6 +11,7 @@
  * -----------------------------------------------------
  * - Serve all API requests via a single HTTP entrypoint
  * - Handle Stripe webhooks safely (raw body required)
+ * - Mount scheduling routes explicitly
  * - Share one Postgres pool across all handlers
  * - Support graceful shutdown (Render / local)
  */
@@ -27,11 +28,13 @@ require("dotenv").config({ override: true });
 ===================================================== */
 const http = require("http");
 const { Pool } = require("pg");
+const { URL } = require("url");
 
 /* =====================================================
    ROUTE HANDLERS
 ===================================================== */
 const { handleAPI } = require("./index");
+const schedulingRouter = require("./scheduling-server");
 const { handleStripeWebhook } = require("./src/webhooks/stripe");
 
 /* =====================================================
@@ -58,17 +61,28 @@ const pool = new Pool({
    HTTP SERVER
 ===================================================== */
 const server = http.createServer(async (req, res) => {
-  const { url, method } = req;
+  const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+  const { pathname } = parsedUrl;
+  const method = req.method;
 
   /* --------------------------------------------------
      STRIPE WEBHOOK (RAW BODY REQUIRED)
      --------------------------------------------------
      CRITICAL:
      - Must be handled BEFORE any JSON/body parsing
-     - No middleware may read req body first
+     - No other handler may read req body first
   -------------------------------------------------- */
-  if (url === "/api/webhook/stripe" && method === "POST") {
+  if (pathname === "/api/webhook/stripe" && method === "POST") {
     return handleStripeWebhook(req, res, pool);
+  }
+
+  /* --------------------------------------------------
+     SCHEDULING ROUTES
+     --------------------------------------------------
+     Mounted explicitly at /scheduling/*
+  -------------------------------------------------- */
+  if (pathname.startsWith("/scheduling")) {
+    return schedulingRouter(req, res);
   }
 
   /* --------------------------------------------------
@@ -84,6 +98,7 @@ server.listen(PORT, "0.0.0.0", async () => {
   console.log("🚀 Smiles API started");
   console.log(`📡 Port: ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
+  console.log(`🗓️  Scheduling: http://localhost:${PORT}/scheduling`);
   console.log(`🔔 Stripe Webhook: http://localhost:${PORT}/api/webhook/stripe`);
 
   try {

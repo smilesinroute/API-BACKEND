@@ -2,73 +2,78 @@
 
 const Stripe = require("stripe");
 
-function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", chunk => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
-}
-
+/**
+ * Stripe webhook handler
+ * - MUST read raw body
+ * - MUST verify signature BEFORE parsing JSON
+ */
 async function handleStripeWebhook(req, res, pool) {
-  const stripeSecret = process.env.STRIPE_SECRET_KEY;
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  const sig = req.headers["stripe-signature"];
 
-  if (!stripeSecret || !webhookSecret) {
-    console.error("[STRIPE] Missing secrets");
-    res.writeHead(500);
-    return res.end("Stripe not configured");
+  if (!sig) {
+    res.statusCode = 400;
+    return res.end("Missing Stripe signature");
   }
 
-  const stripe = new Stripe(stripeSecret, { apiVersion: "2024-06-20" });
+  let rawBody;
+
+  try {
+    rawBody = await new Promise((resolve, reject) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => resolve(Buffer.concat(chunks)));
+      req.on("error", reject);
+    });
+  } catch (err) {
+    res.statusCode = 400;
+    return res.end("Failed to read request body");
+  }
 
   let event;
-  try {
-    const rawBody = await readRawBody(req);
-    const sig = req.headers["stripe-signature"];
 
+  try {
     event = stripe.webhooks.constructEvent(
       rawBody,
       sig,
-      webhookSecret
+      process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
     console.error("[STRIPE] Signature failed:", err.message);
-    res.writeHead(400);
-    return res.end("Invalid signature");
+    res.statusCode = 400;
+    return res.end(`Webhook Error: ${err.message}`);
   }
 
-  try {
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      const orderId = session.metadata?.order_id;
+  /* ============================================
+     HANDLE EVENTS
+  ============================================ */
 
-      if (!orderId) throw new Error("Missing order_id");
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+    const orderId = session.metadata?.order_id;
 
-      await pool.query(
-        `
-        UPDATE orders
-        SET
-          payment_status = 'paid',
-          paid_at = NOW(),
-          status = 'ready_for_dispatch'
-        WHERE id = $1
-          AND payment_status <> 'paid'
-        `,
-        [orderId]
-      );
-
-      console.log("[STRIPE] Order paid:", orderId);
+    if (!orderId) {
+      res.statusCode = 400;
+      return res.end("Missing order_id metadata");
     }
 
-    res.writeHead(200);
-    res.end("ok");
-  } catch (err) {
-    console.error("[STRIPE] Handler error:", err.message);
-    res.writeHead(500);
-    res.end("Webhook error");
+    await pool.query(
+      `
+      UPDATE orders
+      SET
+        payment_status = 'paid',
+        paid_at = NOW(),
+        status = 'ready_for_dispatch'
+      WHERE id = $1
+      `,
+      [orderId]
+    );
+
+    console.log(`✅ Order ${orderId} marked as PAID`);
   }
+
+  res.statusCode = 200;
+  res.end("ok");
 }
 
 module.exports = { handleStripeWebhook };
