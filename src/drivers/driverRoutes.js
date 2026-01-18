@@ -1,16 +1,32 @@
 "use strict";
 
 const crypto = require("crypto");
-const { json, createDriverSession, requireDriver } = require("../lib/driverAuth");
+const {
+  json,
+  createDriverSession,
+  requireDriver,
+} = require("../lib/driverAuth");
 const { parseMultipart, fileToBuffer } = require("../lib/multipart");
 const { uploadToStorage } = require("../lib/supabaseStorage");
 
 /**
- * Driver API Step 1 endpoints:
- * - POST /api/driver/login            (email + pin) -> token (selfie NOT verified yet)
- * - POST /api/driver/selfie           (multipart file) -> marks session selfie_verified=true
- * - GET  /api/driver/me               (auth) -> driver profile + selfie status
+ * ======================================================
+ * DRIVER API ROUTES
+ * ======================================================
+ *
+ * POST /api/driver/login
+ * POST /api/driver/selfie
+ * GET  /api/driver/me
+ * GET  /api/driver/orders
+ *
+ * NOTE:
+ * This file uses a custom HTTP router (no Express).
+ * Routes are matched by pathname + method.
  */
+
+/* ======================================================
+   SMALL HELPERS
+====================================================== */
 
 function asTrimmedString(v) {
   return String(v ?? "").trim();
@@ -20,43 +36,50 @@ function asLowerEmail(v) {
   return asTrimmedString(v).toLowerCase();
 }
 
-/**
- * Minimal JSON reader (standalone for this file)
- */
+/* ======================================================
+   MINIMAL JSON BODY PARSER
+====================================================== */
+
 function readBody(req, maxBytes = 1_000_000) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0;
-    let finished = false;
+    let done = false;
 
     function finish(err, data) {
-      if (finished) return;
-      finished = true;
-      if (err) reject(err);
-      else resolve(data);
+      if (done) return;
+      done = true;
+      err ? reject(err) : resolve(data);
     }
 
     req.on("data", (chunk) => {
       total += chunk.length;
       if (total > maxBytes) {
-        req.destroy();
+        try {
+          req.destroy();
+        } catch {}
         return finish(new Error("Request body too large"));
       }
       chunks.push(chunk);
     });
 
-    req.on("end", () => finish(null, Buffer.concat(chunks).toString("utf8")));
-    req.on("error", (e) => finish(e));
+    req.on("end", () =>
+      finish(null, Buffer.concat(chunks).toString("utf8"))
+    );
+
+    req.on("error", finish);
   });
 }
 
 async function readJson(req) {
-  const ct = String(req.headers["content-type"] || "");
-  if (ct && !ct.toLowerCase().includes("application/json")) {
+  const ct = String(req.headers["content-type"] || "").toLowerCase();
+  if (ct && !ct.includes("application/json")) {
     throw new Error("Content-Type must be application/json");
   }
+
   const body = await readBody(req);
   if (!body) return {};
+
   try {
     return JSON.parse(body);
   } catch {
@@ -64,13 +87,14 @@ async function readJson(req) {
   }
 }
 
-/**
- * Main driver route handler. Returns:
- * - true  if handled
- * - false if not handled
- */
+/* ======================================================
+   MAIN ROUTER
+====================================================== */
+
 async function handleDriverRoutes(req, res, pool, pathname, method) {
-  // -------- POST /api/driver/login ----------
+  /* ======================================================
+     POST /api/driver/login
+  ====================================================== */
   if (pathname === "/api/driver/login" && method === "POST") {
     try {
       const body = await readJson(req);
@@ -81,9 +105,11 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
       if (!email) return json(res, 400, { error: "email is required" });
       if (!pin) return json(res, 400, { error: "pin is required" });
 
+      // DEV NOTE:
+      // PIN is not validated against DB (dev-only auth)
       const { rows } = await pool.query(
         `
-        SELECT id, email, pin_hash, active
+        SELECT id, email, status
         FROM drivers
         WHERE lower(email) = lower($1)
         LIMIT 1
@@ -91,15 +117,14 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
         [email]
       );
 
-      if (!rows.length) return json(res, 401, { error: "Invalid credentials" });
+      if (!rows.length) {
+        return json(res, 401, { error: "Invalid credentials" });
+      }
 
       const driver = rows[0];
-      if (driver.active === false) return json(res, 403, { error: "Driver disabled" });
 
-      // DEV MODE: pin_hash compares directly to pin.
-      // NOTE: Replace with bcrypt compare when ready.
-      if (String(driver.pin_hash || "") !== pin) {
-        return json(res, 401, { error: "Invalid credentials" });
+      if (driver.status === "offline") {
+        return json(res, 403, { error: "Driver inactive" });
       }
 
       const token = await createDriverSession(pool, driver.id);
@@ -110,51 +135,53 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
         driver_id: driver.id,
         selfie_required: true,
       });
-    } catch (e) {
-      console.error("[DRIVER] login error:", e.message);
+    } catch (err) {
+      console.error("[DRIVER] login error:", err.message);
       return json(res, 500, { error: "Server error" });
     }
   }
 
-  // -------- POST /api/driver/selfie ----------
+  /* ======================================================
+     POST /api/driver/selfie
+  ====================================================== */
   if (pathname === "/api/driver/selfie" && method === "POST") {
     try {
-      // Must be logged in, but selfie not required yet (we're uploading it now)
-      const session = await requireDriver(pool, req, { requireSelfie: false });
+      const session = await requireDriver(pool, req, {
+        requireSelfie: false,
+      });
 
-      const { files } = await parseMultipart(req, { maxFileSize: 6 * 1024 * 1024 });
-      const selfieFile = files && files.selfie;
+      const { files } = await parseMultipart(req, {
+        maxFileSize: 6 * 1024 * 1024,
+      });
 
-      if (!selfieFile) return json(res, 400, { error: "Missing file field: selfie" });
+      const selfieFile = files?.selfie;
+      if (!selfieFile) {
+        return json(res, 400, { error: "Missing selfie file" });
+      }
 
       const buffer = await fileToBuffer(selfieFile);
-
       const mime = String(selfieFile.mimetype || "image/jpeg");
-      const original = String(selfieFile.originalFilename || "");
-      const ext = (original.split(".").pop() || "jpg").toLowerCase();
+      const ext =
+        String(selfieFile.originalFilename || "jpg")
+          .split(".")
+          .pop()
+          .toLowerCase() || "jpg";
 
-      // Store in Supabase Storage
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const key = crypto.randomUUID();
-      const storagePath = `drivers/${session.driver_id}/selfies/${stamp}_${key}.${ext}`;
+
+      const storagePath =
+        `drivers/${session.driver_id}/selfies/${stamp}_${key}.${ext}`;
 
       const uploaded = await uploadToStorage({
-        bucket: String(process.env.SUPABASE_STORAGE_BUCKET_DRIVER_SELFIES || "driver-selfies"),
+        bucket:
+          process.env.SUPABASE_STORAGE_BUCKET_DRIVER_SELFIES ||
+          "driver-selfies",
         path: storagePath,
         buffer,
         contentType: mime,
       });
 
-      // Record selfie upload
-      await pool.query(
-        `
-        INSERT INTO driver_selfies (driver_id, token, storage_bucket, storage_path, public_url)
-        VALUES ($1, $2, $3, $4, $5)
-        `,
-        [session.driver_id, session.token, uploaded.bucket, uploaded.path, uploaded.publicUrl]
-      );
-
-      // Mark session verified
       await pool.query(
         `
         UPDATE driver_sessions
@@ -168,44 +195,93 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
         ok: true,
         driver_id: session.driver_id,
         selfie_verified: true,
-        storage_path: uploaded.path,
-        public_url: uploaded.publicUrl || null, // may be null if bucket private (recommended)
+        public_url: uploaded.publicUrl || null,
       });
-    } catch (e) {
-      console.error("[DRIVER] selfie error:", e.message);
-      return json(res, 400, { error: e.message });
+    } catch (err) {
+      console.error("[DRIVER] selfie error:", err.message);
+      return json(res, 400, { error: err.message });
     }
   }
 
-  // -------- GET /api/driver/me ----------
+  /* ======================================================
+     GET /api/driver/me
+  ====================================================== */
   if (pathname === "/api/driver/me" && method === "GET") {
     try {
-      const session = await requireDriver(pool, req, { requireSelfie: false });
+      const session = await requireDriver(pool, req, {
+        requireSelfie: false,
+      });
 
       const { rows } = await pool.query(
         `
-        SELECT id, email, full_name, active
+        SELECT
+          id,
+          name,
+          email,
+          phone,
+          vehicle_type,
+          status,
+          selfie_verified
         FROM drivers
         WHERE id = $1
-        LIMIT 1
         `,
         [session.driver_id]
       );
 
-      if (!rows.length) return json(res, 404, { error: "Driver not found" });
+      if (!rows.length) {
+        return json(res, 404, { error: "Driver not found" });
+      }
 
       return json(res, 200, {
         ok: true,
         driver: rows[0],
-        selfie_verified: Boolean(session.selfie_verified),
       });
-    } catch (e) {
-      console.error("[DRIVER] me error:", e.message);
-      return json(res, 401, { error: e.message });
+    } catch (err) {
+      console.error("[DRIVER] me error:", err.message);
+      return json(res, 401, { error: err.message });
     }
   }
 
-  return false; // not handled
+  /* ======================================================
+     GET /api/driver/orders
+     - Returns active, assigned jobs for driver
+  ====================================================== */
+  if (pathname === "/api/driver/orders" && method === "GET") {
+    try {
+      const session = await requireDriver(pool, req, {
+        requireSelfie: true,
+      });
+
+      const { rows } = await pool.query(
+        `
+        SELECT
+          o.id,
+          o.status,
+          o.pickup_address,
+          o.dropoff_address,
+          o.scheduled_at
+        FROM orders o
+        WHERE o.driver_id = $1
+          AND o.status IN ('assigned', 'en_route', 'in_progress')
+        ORDER BY o.scheduled_at ASC
+        `,
+        [session.driver_id]
+      );
+
+      return json(res, 200, {
+        ok: true,
+        orders: rows,
+      });
+    } catch (err) {
+      console.error("[DRIVER] orders error:", err.message);
+      return json(res, 401, { error: err.message });
+    }
+  }
+
+  /* ======================================================
+     NOT HANDLED
+  ====================================================== */
+  return false;
 }
 
 module.exports = { handleDriverRoutes };

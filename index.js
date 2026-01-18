@@ -367,7 +367,8 @@ async function handleAPI(req, res, pool) {
     if (await handleDriverProof(req, res, pool, pathname, method)) return;
   } catch (e) {
     console.error("[DRIVER] routing error:", e.message);
-    return json(res, 500, { error: "Driver routing error" });
+    if (!res.headersSent) return json(res, 500, { error: "Driver routing error" });
+    return;
   }
 
   /* ---------- HEALTH ---------- */
@@ -849,3 +850,4 @@ async function handleAPI(req, res, pool) {
 }
 
 module.exports = { handleAPI };
+
