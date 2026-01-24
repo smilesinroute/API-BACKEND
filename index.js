@@ -11,6 +11,11 @@ const url = require("url");
 const crypto = require("crypto");
 
 /* ======================================================
+   External Helpers
+====================================================== */
+const { getDistanceMiles } = require("./src/lib/distanceMatrix");
+
+/* ======================================================
    DRIVER ROUTES (PRIORITY)
 ====================================================== */
 const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
@@ -66,6 +71,7 @@ async function readJson(req) {
 
   const raw = await readBody(req);
   if (!raw) return {};
+
   try {
     return JSON.parse(raw);
   } catch {
@@ -74,13 +80,15 @@ async function readJson(req) {
 }
 
 /* ======================================================
-   VALIDATION
+   VALIDATION HELPERS
 ====================================================== */
 const str = (v) => String(v ?? "").trim();
 
 function num(v, label) {
   const n = Number(v);
-  if (!Number.isFinite(n)) throw new Error(`${label} must be a number`);
+  if (!Number.isFinite(n)) {
+    throw new Error(`${label} must be a number`);
+  }
   return n;
 }
 
@@ -105,14 +113,16 @@ function generateTimeSlots() {
   const slots = [];
   for (let h = 8; h < 18; h++) {
     for (let m = 0; m < 60; m += 30) {
-      slots.push(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
+      slots.push(
+        `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
+      );
     }
   }
   return slots;
 }
 
 /* ======================================================
-   MAIN ROUTER
+   MAIN API ROUTER
 ====================================================== */
 async function handleAPI(req, res, pool) {
   const { pathname } = url.parse(req.url, true);
@@ -146,7 +156,7 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- AVAILABLE SLOTS ---------- */
+  /* ---------- AVAILABLE TIME SLOTS ---------- */
   if (pathname.startsWith("/api/available-slots/") && method === "GET") {
     try {
       const date = isoDate(pathname.split("/").pop());
@@ -159,18 +169,29 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- DISTANCE ---------- */
+  /* ---------- DISTANCE (REAL GOOGLE CALCULATION) ---------- */
   if (pathname === "/api/distance" && method === "POST") {
     try {
       const body = await readJson(req);
+
       if (!body.pickup || !body.delivery) {
-        throw new Error("pickup and delivery required");
+        return json(res, 400, {
+          error: "pickup and delivery addresses are required",
+        });
       }
 
-      // TEMP placeholder
-      return json(res, 200, { distance_miles: 12.4 });
+      const miles = await getDistanceMiles(
+        body.pickup,
+        body.delivery
+      );
+
+      return json(res, 200, { distance_miles: miles });
+
     } catch (err) {
-      return json(res, 400, { error: err.message });
+      console.error("[DISTANCE]", err.message);
+      return json(res, 500, {
+        error: err.message || "Distance calculation failed",
+      });
     }
   }
 
@@ -188,19 +209,21 @@ async function handleAPI(req, res, pool) {
         priority: body.priority ? 15 : 0,
       };
 
-      const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+      const total = Object.values(breakdown)
+        .reduce((a, b) => a + b, 0);
 
       return json(res, 200, {
         quote_id: crypto.randomUUID(),
         breakdown,
         total: Number(total.toFixed(2)),
       });
+
     } catch (err) {
       return json(res, 400, { error: err.message });
     }
   }
 
-  /* ---------- CONFIRM ORDER (THIS FIXES FINALIZE) ---------- */
+  /* ---------- CONFIRM ORDER ---------- */
   if (pathname === "/api/confirm" && method === "POST") {
     try {
       const body = await readJson(req);
@@ -236,6 +259,7 @@ async function handleAPI(req, res, pool) {
         order_id: rows[0].id,
         status: "confirmed_pending_payment",
       });
+
     } catch (err) {
       return json(res, 400, { error: err.message });
     }
