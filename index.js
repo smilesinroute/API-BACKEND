@@ -56,16 +56,17 @@ function readBody(req, limit = 1_000_000) {
       chunks.push(chunk);
     });
 
-    req.on("end", () =>
-      resolve(Buffer.concat(chunks).toString("utf8"))
-    );
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+
     req.on("error", reject);
   });
 }
 
 async function readJson(req) {
   const type = String(req.headers["content-type"] || "");
-  if (type && !type.includes("application/json")) {
+  if (!type.includes("application/json")) {
     throw new Error("Content-Type must be application/json");
   }
 
@@ -113,9 +114,7 @@ function generateTimeSlots() {
   const slots = [];
   for (let h = 8; h < 18; h++) {
     for (let m = 0; m < 60; m += 30) {
-      slots.push(
-        `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
-      );
+      slots.push(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
     }
   }
   return slots;
@@ -169,7 +168,7 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- DISTANCE (REAL GOOGLE CALCULATION) ---------- */
+  /* ---------- DISTANCE (GOOGLE MAPS) ---------- */
   if (pathname === "/api/distance" && method === "POST") {
     try {
       const body = await readJson(req);
@@ -180,37 +179,30 @@ async function handleAPI(req, res, pool) {
         });
       }
 
-      const miles = await getDistanceMiles(
-        body.pickup,
-        body.delivery
-      );
-
+      const miles = await getDistanceMiles(body.pickup, body.delivery);
       return json(res, 200, { distance_miles: miles });
 
     } catch (err) {
       console.error("[DISTANCE]", err.message);
-      return json(res, 500, {
-        error: err.message || "Distance calculation failed",
-      });
+      return json(res, 500, { error: err.message });
     }
   }
 
-  /* ---------- QUOTE ---------- */
+  /* ---------- QUOTE (THIS FIXES ADD-ONS DISPLAY) ---------- */
   if (pathname === "/api/quote" && method === "POST") {
     try {
       const body = await readJson(req);
-
       const miles = num(body.distance_miles, "distance_miles");
 
       const breakdown = {
         base: 25,
-        mileage: miles * 2.25,
+        mileage: Number((miles * 2.25).toFixed(2)),
         fragile: body.fragile ? 10 : 0,
         priority: body.priority ? 15 : 0,
+        timeSensitive: body.timeSensitive ? 20 : 0,
       };
 
-      const total = Object.values(breakdown)
-        .reduce((a, b) => a + b, 0);
+      const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
 
       return json(res, 200, {
         quote_id: crypto.randomUUID(),
