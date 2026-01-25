@@ -4,7 +4,7 @@
  * Smiles in Route — Core API Router
  * =================================
  * - Plain Node.js HTTP routing (NO Express)
- * - Shared Supabase Postgres pool
+ * - Shared Postgres pool (passed in from server.js)
  * - Public + Admin + Driver routes
  */
 
@@ -25,7 +25,7 @@ const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
 
 /* ======================================================
-   ADMIN ROUTES
+   ADMIN / DISPATCH ROUTES
 ====================================================== */
 const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 
@@ -133,10 +133,10 @@ async function handleAPI(req, res, pool) {
   const { pathname } = url.parse(req.url, true);
   const method = req.method;
 
-  /* ---------- CORS ---------- */
+  /* ---------- CORS (SAFE FOR NODE 22) ---------- */
   const origin = req.headers.origin;
 
-  if (origin === process.env.ADMIN_ORIGIN) {
+  if (origin && origin === process.env.ADMIN_ORIGIN) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
 
@@ -305,4 +305,3 @@ async function handleAPI(req, res, pool) {
 }
 
 module.exports = { handleAPI };
-
