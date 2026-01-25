@@ -3,15 +3,16 @@
 /**
  * Smiles in Route — Core API Router
  * =================================
- * Plain Node.js HTTP routing (NO Express)
- * Shared Supabase Postgres pool
+ * - Plain Node.js HTTP routing (NO Express)
+ * - Shared Supabase Postgres pool
+ * - Public + Admin + Driver routes
  */
 
 const url = require("url");
 const crypto = require("crypto");
 
 /* ======================================================
-   External Helpers
+   EXTERNAL HELPERS
 ====================================================== */
 const { getDistanceMiles } = require("./src/lib/distanceMatrix");
 
@@ -22,6 +23,11 @@ const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
 const { handleDriverOrders } = require("./src/drivers/driverOrders");
 const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
+
+/* ======================================================
+   ADMIN ROUTES
+====================================================== */
+const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 
 /* ======================================================
    RESPONSE HELPERS
@@ -128,13 +134,23 @@ async function handleAPI(req, res, pool) {
   const method = req.method;
 
   /* ---------- CORS ---------- */
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  const origin = req.headers.origin;
+
+  if (origin === process.env.ADMIN_ORIGIN) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
 
   if (method === "OPTIONS") return res.end();
 
-  /* ---------- DRIVER ROUTES ---------- */
+  /* ======================================================
+     DRIVER ROUTES (FIRST)
+  ====================================================== */
   try {
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
@@ -145,7 +161,23 @@ async function handleAPI(req, res, pool) {
     return json(res, 500, { error: "Driver routing error" });
   }
 
-  /* ---------- HEALTH ---------- */
+  /* ======================================================
+     ADMIN / DISPATCH ROUTES
+  ====================================================== */
+  try {
+    if (
+      await handleAdminRoutes(req, res, pool, pathname, method, json)
+    ) {
+      return;
+    }
+  } catch (err) {
+    console.error("[ADMIN]", err.message);
+    return json(res, err.statusCode || 500, { error: err.message });
+  }
+
+  /* ======================================================
+     HEALTH CHECK
+  ====================================================== */
   if (pathname === "/api/health" && method === "GET") {
     try {
       await pool.query("SELECT 1");
@@ -155,7 +187,9 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- AVAILABLE TIME SLOTS ---------- */
+  /* ======================================================
+     AVAILABLE TIME SLOTS
+  ====================================================== */
   if (pathname.startsWith("/api/available-slots/") && method === "GET") {
     try {
       const date = isoDate(pathname.split("/").pop());
@@ -168,7 +202,9 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- DISTANCE (GOOGLE MAPS) ---------- */
+  /* ======================================================
+     DISTANCE (GOOGLE MAPS)
+  ====================================================== */
   if (pathname === "/api/distance" && method === "POST") {
     try {
       const body = await readJson(req);
@@ -181,14 +217,15 @@ async function handleAPI(req, res, pool) {
 
       const miles = await getDistanceMiles(body.pickup, body.delivery);
       return json(res, 200, { distance_miles: miles });
-
     } catch (err) {
       console.error("[DISTANCE]", err.message);
       return json(res, 500, { error: err.message });
     }
   }
 
-  /* ---------- QUOTE (THIS FIXES ADD-ONS DISPLAY) ---------- */
+  /* ======================================================
+     QUOTE
+  ====================================================== */
   if (pathname === "/api/quote" && method === "POST") {
     try {
       const body = await readJson(req);
@@ -209,13 +246,14 @@ async function handleAPI(req, res, pool) {
         breakdown,
         total: Number(total.toFixed(2)),
       });
-
     } catch (err) {
       return json(res, 400, { error: err.message });
     }
   }
 
-  /* ---------- CONFIRM ORDER ---------- */
+  /* ======================================================
+     CONFIRM ORDER (CUSTOMER)
+  ====================================================== */
   if (pathname === "/api/confirm" && method === "POST") {
     try {
       const body = await readJson(req);
@@ -251,13 +289,14 @@ async function handleAPI(req, res, pool) {
         order_id: rows[0].id,
         status: "confirmed_pending_payment",
       });
-
     } catch (err) {
       return json(res, 400, { error: err.message });
     }
   }
 
-  /* ---------- ROOT ---------- */
+  /* ======================================================
+     ROOT
+  ====================================================== */
   if (pathname === "/" && method === "GET") {
     return text(res, 200, "Smiles in Route API");
   }
@@ -266,3 +305,4 @@ async function handleAPI(req, res, pool) {
 }
 
 module.exports = { handleAPI };
+
