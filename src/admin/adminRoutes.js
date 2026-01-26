@@ -1,15 +1,16 @@
 "use strict";
 
 const { requireAdmin } = require("./adminAuth");
+const { sendCustomerPaymentLink } = require("../lib/dispatchEmails");
+const { createPaymentSession } = require("../lib/stripeCheckout");
 
 /**
  * ADMIN ROUTES
  * ============
- * Dispatch control surface
+ * Dispatch / Admin control surface
  */
 
 async function handleAdminRoutes(req, res, pool, pathname, method, json) {
-
   /* ======================================================
      DASHBOARD SUMMARY
      GET /admin/dashboard
@@ -36,7 +37,6 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       pool.query(`
         SELECT COUNT(*)::int AS count
         FROM drivers
-        WHERE active = true
       `),
       pool.query(`
         SELECT COALESCE(SUM(total_amount), 0)::numeric AS total
@@ -75,6 +75,8 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   /* ======================================================
      APPROVE ORDER
      POST /admin/orders/:id/approve
+     → CREATE STRIPE CHECKOUT
+     → EMAIL CUSTOMER
   ====================================================== */
   if (
     pathname.startsWith("/admin/orders/") &&
@@ -83,19 +85,59 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   ) {
     requireAdmin(req);
 
-    const id = pathname.split("/")[3];
+    const orderId = pathname.split("/")[3];
 
+    /* ---------- Load order ---------- */
     const { rows } = await pool.query(
-      `
-      UPDATE orders
-      SET status = 'approved_pending_payment'
-      WHERE id = $1
-      RETURNING *
-      `,
-      [id]
+      `SELECT * FROM orders WHERE id = $1`,
+      [orderId]
     );
 
-    json(res, 200, { order: rows[0] });
+    const order = rows[0];
+    if (!order) {
+      json(res, 404, { error: "Order not found" });
+      return true;
+    }
+
+    if (!order.customer_email) {
+      json(res, 400, { error: "Order missing customer email" });
+      return true;
+    }
+
+    if (order.status !== "confirmed_pending_payment") {
+      json(res, 400, { error: "Order is not in approvable state" });
+      return true;
+    }
+
+    /* ---------- Create Stripe Checkout ---------- */
+    const session = await createPaymentSession(order);
+
+    /* ---------- Persist Stripe info ---------- */
+    await pool.query(
+      `
+      UPDATE orders
+      SET
+        status = 'approved_pending_payment',
+        stripe_session_id = $2,
+        stripe_checkout_url = $3
+      WHERE id = $1
+      `,
+      [order.id, session.id, session.url]
+    );
+
+    /* ---------- Email customer ---------- */
+    await sendCustomerPaymentLink({
+      to: order.customer_email,
+      paymentLink: session.url,
+      order,
+    });
+
+    json(res, 200, {
+      success: true,
+      message: "Payment link sent to customer",
+      orderId: order.id,
+    });
+
     return true;
   }
 
@@ -110,7 +152,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   ) {
     requireAdmin(req);
 
-    const id = pathname.split("/")[3];
+    const orderId = pathname.split("/")[3];
 
     await pool.query(
       `
@@ -118,7 +160,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       SET status = 'rejected'
       WHERE id = $1
       `,
-      [id]
+      [orderId]
     );
 
     json(res, 200, { success: true });
