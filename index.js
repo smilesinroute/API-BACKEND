@@ -45,7 +45,7 @@ function text(res, status, message) {
 }
 
 /* ======================================================
-   BODY PARSING
+   BODY PARSING (RAW NODE)
 ====================================================== */
 function readBody(req, limit = 1_000_000) {
   return new Promise((resolve, reject) => {
@@ -62,9 +62,7 @@ function readBody(req, limit = 1_000_000) {
       chunks.push(chunk);
     });
 
-    req.on("end", () =>
-      resolve(Buffer.concat(chunks).toString("utf8"))
-    );
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -79,13 +77,15 @@ async function readJson(req) {
 }
 
 /* ======================================================
-   VALIDATION
+   VALIDATION HELPERS
 ====================================================== */
 const str = (v) => String(v ?? "").trim();
 
 function num(v, label) {
   const n = Number(v);
-  if (!Number.isFinite(n)) throw new Error(`${label} must be a number`);
+  if (!Number.isFinite(n)) {
+    throw new Error(`${label} must be a number`);
+  }
   return n;
 }
 
@@ -104,7 +104,7 @@ function hhmm(v) {
 }
 
 /* ======================================================
-   SCHEDULING
+   SCHEDULING HELPERS
 ====================================================== */
 function generateTimeSlots() {
   const slots = [];
@@ -117,7 +117,7 @@ function generateTimeSlots() {
 }
 
 /* ======================================================
-   MAIN ROUTER
+   MAIN API ROUTER
 ====================================================== */
 async function handleAPI(req, res, pool) {
   const { pathname } = url.parse(req.url, true);
@@ -127,8 +127,8 @@ async function handleAPI(req, res, pool) {
   const origin = req.headers.origin;
   const allowedOrigins = [
     process.env.ADMIN_ORIGIN,
-    "https://admin.smilesinroute.delivery",
     "http://localhost:5174",
+    "https://admin.smilesinroute.delivery",
   ].filter(Boolean);
 
   if (origin && allowedOrigins.includes(origin)) {
@@ -137,15 +137,14 @@ async function handleAPI(req, res, pool) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 
   if (method === "OPTIONS") return res.end();
 
-  /* ---------- DRIVER ROUTES ---------- */
+  /* ======================================================
+     DRIVER ROUTES (FIRST)
+  ====================================================== */
   try {
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
@@ -156,7 +155,9 @@ async function handleAPI(req, res, pool) {
     return json(res, 500, { error: "Driver routing error" });
   }
 
-  /* ---------- ADMIN ROUTES ---------- */
+  /* ======================================================
+     ADMIN ROUTES
+  ====================================================== */
   try {
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) {
       return;
@@ -166,7 +167,9 @@ async function handleAPI(req, res, pool) {
     return json(res, err.statusCode || 500, { error: err.message });
   }
 
-  /* ---------- HEALTH ---------- */
+  /* ======================================================
+     HEALTH CHECK
+  ====================================================== */
   if (pathname === "/api/health" && method === "GET") {
     try {
       await pool.query("SELECT 1");
@@ -176,20 +179,21 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- AVAILABLE SLOTS ---------- */
+  /* ======================================================
+     AVAILABLE TIME SLOTS
+  ====================================================== */
   if (pathname.startsWith("/api/available-slots/") && method === "GET") {
     try {
       const date = isoDate(pathname.split("/").pop());
-      return json(res, 200, {
-        date,
-        availableSlots: generateTimeSlots(),
-      });
+      return json(res, 200, { date, availableSlots: generateTimeSlots() });
     } catch (err) {
       return json(res, 400, { error: err.message });
     }
   }
 
-  /* ---------- DISTANCE ---------- */
+  /* ======================================================
+     DISTANCE
+  ====================================================== */
   if (pathname === "/api/distance" && method === "POST") {
     try {
       const body = await readJson(req);
@@ -198,6 +202,7 @@ async function handleAPI(req, res, pool) {
           error: "pickup and delivery addresses required",
         });
       }
+
       const miles = await getDistanceMiles(body.pickup, body.delivery);
       return json(res, 200, { distance_miles: miles });
     } catch (err) {
@@ -205,7 +210,9 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- QUOTE ---------- */
+  /* ======================================================
+     QUOTE
+  ====================================================== */
   if (pathname === "/api/quote" && method === "POST") {
     try {
       const body = await readJson(req);
@@ -231,10 +238,13 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- CONFIRM ORDER ---------- */
+  /* ======================================================
+     CONFIRM ORDER (CUSTOMER)
+  ====================================================== */
   if (pathname === "/api/confirm" && method === "POST") {
     try {
       const body = await readJson(req);
+
       const pickup = str(body.pickup_address);
       const delivery = str(body.delivery_address);
 
@@ -274,7 +284,9 @@ async function handleAPI(req, res, pool) {
     }
   }
 
-  /* ---------- ROOT ---------- */
+  /* ======================================================
+     ROOT
+  ====================================================== */
   if (pathname === "/" && method === "GET") {
     return text(res, 200, "Smiles in Route API");
   }
