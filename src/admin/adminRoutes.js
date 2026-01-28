@@ -6,34 +6,70 @@ const { createPaymentSession } = require("../lib/stripeCheckout");
 
 /**
  * ADMIN ROUTES
- * ============
+ * =============
  * Dispatch / Admin control surface
+ *
+ * Order lifecycle (authoritative):
+ * confirmed_pending_payment  → admin approval required
+ * approved_pending_payment   → awaiting customer payment
+ * paid                       → payment confirmed
+ * in_progress                → driver assigned
+ * completed                  → finished
+ * rejected                   → admin rejected
  */
 
 async function handleAdminRoutes(req, res, pool, pathname, method, json) {
+
   /* ======================================================
-     DASHBOARD SUMMARY
+     DASHBOARD
      GET /admin/dashboard
+     → Authoritative dispatch snapshot
   ====================================================== */
   if (pathname === "/admin/dashboard" && method === "GET") {
     requireAdmin(req);
 
-    const [
-      pendingRes,
-      transitRes,
-      driversRes,
-      revenueRes,
-    ] = await Promise.all([
-      pool.query(`
-        SELECT COUNT(*)::int AS count
-        FROM orders
-        WHERE status = 'confirmed_pending_payment'
-      `),
-      pool.query(`
-        SELECT COUNT(*)::int AS count
-        FROM orders
-        WHERE status = 'in_progress'
-      `),
+    /* ---------- Load active (non-final) orders ---------- */
+    const { rows: orders } = await pool.query(`
+      SELECT
+        id,
+        status,
+        pickup_address,
+        delivery_address,
+        scheduled_date,
+        scheduled_time,
+        total_amount,
+        created_at
+      FROM orders
+      WHERE status NOT IN ('completed', 'rejected')
+      ORDER BY created_at ASC
+    `);
+
+    /* ---------- Group orders into lifecycle lanes ---------- */
+    const lanes = {
+      action_required: [],
+      awaiting_payment: [],
+      active: [],
+    };
+
+    for (const order of orders) {
+      switch (order.status) {
+        case "confirmed_pending_payment":
+          lanes.action_required.push(order);
+          break;
+
+        case "approved_pending_payment":
+          lanes.awaiting_payment.push(order);
+          break;
+
+        case "paid":
+        case "in_progress":
+          lanes.active.push(order);
+          break;
+      }
+    }
+
+    /* ---------- Supporting stats ---------- */
+    const [driversRes, revenueRes] = await Promise.all([
       pool.query(`
         SELECT COUNT(*)::int AS count
         FROM drivers
@@ -41,15 +77,25 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       pool.query(`
         SELECT COALESCE(SUM(total_amount), 0)::numeric AS total
         FROM orders
-        WHERE created_at::date = CURRENT_DATE
+        WHERE status = 'paid'
+          AND paid_at IS NOT NULL
+          AND paid_at::date = CURRENT_DATE
       `),
     ]);
 
     json(res, 200, {
-      pendingOrders: pendingRes.rows[0].count,
-      inTransit: transitRes.rows[0].count,
-      activeDrivers: driversRes.rows[0].count,
-      revenueToday: Number(revenueRes.rows[0].total),
+      stats: {
+        awaitingApproval: lanes.action_required.length,
+        awaitingPayment: lanes.awaiting_payment.length,
+        activeOrders: lanes.active.length,
+        totalDrivers: driversRes.rows[0].count,
+        revenueToday: Number(revenueRes.rows[0].total),
+      },
+      lanes,
+      meta: {
+        system: "live",
+        checkedAt: new Date().toISOString(),
+      },
     });
 
     return true;
@@ -58,6 +104,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   /* ======================================================
      LIST ORDERS
      GET /admin/orders
+     → Full order history (admin tools / ops)
   ====================================================== */
   if (pathname === "/admin/orders" && method === "GET") {
     requireAdmin(req);
@@ -75,8 +122,8 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   /* ======================================================
      APPROVE ORDER
      POST /admin/orders/:id/approve
-     → CREATE STRIPE CHECKOUT
-     → EMAIL CUSTOMER
+     → Create Stripe Checkout
+     → Email customer payment link
   ====================================================== */
   if (
     pathname.startsWith("/admin/orders/") &&
@@ -94,6 +141,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     );
 
     const order = rows[0];
+
     if (!order) {
       json(res, 404, { error: "Order not found" });
       return true;
@@ -112,7 +160,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     /* ---------- Create Stripe Checkout ---------- */
     const session = await createPaymentSession(order);
 
-    /* ---------- Persist Stripe info ---------- */
+    /* ---------- Persist Stripe metadata ---------- */
     await pool.query(
       `
       UPDATE orders
