@@ -20,12 +20,11 @@ const { uploadToStorage } = require("../lib/supabaseStorage");
  * GET  /api/driver/orders
  *
  * NOTE:
- * This file uses a custom HTTP router (no Express).
- * Routes are matched by pathname + method.
+ * Custom HTTP router (no Express)
  */
 
 /* ======================================================
-   SMALL HELPERS
+   HELPERS
 ====================================================== */
 
 function asTrimmedString(v) {
@@ -37,37 +36,28 @@ function asLowerEmail(v) {
 }
 
 /* ======================================================
-   MINIMAL JSON BODY PARSER
+   BODY PARSING
 ====================================================== */
 
 function readBody(req, maxBytes = 1_000_000) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0;
-    let done = false;
-
-    function finish(err, data) {
-      if (done) return;
-      done = true;
-      err ? reject(err) : resolve(data);
-    }
 
     req.on("data", (chunk) => {
       total += chunk.length;
       if (total > maxBytes) {
-        try {
-          req.destroy();
-        } catch {}
-        return finish(new Error("Request body too large"));
+        req.destroy();
+        reject(new Error("Request body too large"));
+        return;
       }
       chunks.push(chunk);
     });
 
     req.on("end", () =>
-      finish(null, Buffer.concat(chunks).toString("utf8"))
+      resolve(Buffer.concat(chunks).toString("utf8"))
     );
-
-    req.on("error", finish);
+    req.on("error", reject);
   });
 }
 
@@ -88,25 +78,23 @@ async function readJson(req) {
 }
 
 /* ======================================================
-   MAIN ROUTER
+   ROUTER
 ====================================================== */
 
 async function handleDriverRoutes(req, res, pool, pathname, method) {
+
   /* ======================================================
      POST /api/driver/login
   ====================================================== */
   if (pathname === "/api/driver/login" && method === "POST") {
     try {
       const body = await readJson(req);
-
       const email = asLowerEmail(body.email);
       const pin = asTrimmedString(body.pin);
 
       if (!email) return json(res, 400, { error: "email is required" });
       if (!pin) return json(res, 400, { error: "pin is required" });
 
-      // DEV NOTE:
-      // PIN is not validated against DB (dev-only auth)
       const { rows } = await pool.query(
         `
         SELECT id, email, status
@@ -122,7 +110,6 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
       }
 
       const driver = rows[0];
-
       if (driver.status === "offline") {
         return json(res, 403, { error: "Driver inactive" });
       }
@@ -165,7 +152,7 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
         String(selfieFile.originalFilename || "jpg")
           .split(".")
           .pop()
-          .toLowerCase() || "jpg";
+          .toLowerCase();
 
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const key = crypto.randomUUID();
@@ -244,7 +231,7 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
 
   /* ======================================================
      GET /api/driver/orders
-     - Returns active, assigned jobs for driver
+     → Assigned + active jobs for driver
   ====================================================== */
   if (pathname === "/api/driver/orders" && method === "GET") {
     try {
@@ -258,12 +245,13 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
           o.id,
           o.status,
           o.pickup_address,
-          o.dropoff_address,
-          o.scheduled_at
+          o.delivery_address,
+          o.scheduled_date,
+          o.scheduled_time
         FROM orders o
-        WHERE o.driver_id = $1
-          AND o.status IN ('assigned', 'en_route', 'in_progress')
-        ORDER BY o.scheduled_at ASC
+        WHERE o.assigned_driver_id = $1
+          AND o.status IN ('assigned', 'in_progress')
+        ORDER BY o.scheduled_date ASC, o.scheduled_time ASC
         `,
         [session.driver_id]
       );
@@ -278,9 +266,6 @@ async function handleDriverRoutes(req, res, pool, pathname, method) {
     }
   }
 
-  /* ======================================================
-     NOT HANDLED
-  ====================================================== */
   return false;
 }
 

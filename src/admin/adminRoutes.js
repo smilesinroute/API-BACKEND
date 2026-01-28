@@ -13,7 +13,8 @@ const { createPaymentSession } = require("../lib/stripeCheckout");
  * confirmed_pending_payment  → admin approval required
  * approved_pending_payment   → awaiting customer payment
  * paid                       → payment confirmed
- * in_progress                → driver assigned
+ * assigned                   → driver assigned (automatic or manual)
+ * in_progress                → driver accepted / started
  * completed                  → finished
  * rejected                   → admin rejected
  */
@@ -62,6 +63,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
           break;
 
         case "paid":
+        case "assigned":
         case "in_progress":
           lanes.active.push(order);
           break;
@@ -77,7 +79,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       pool.query(`
         SELECT COALESCE(SUM(total_amount), 0)::numeric AS total
         FROM orders
-        WHERE status = 'paid'
+        WHERE payment_status = 'paid'
           AND paid_at IS NOT NULL
           AND paid_at::date = CURRENT_DATE
       `),
@@ -104,7 +106,6 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   /* ======================================================
      LIST ORDERS
      GET /admin/orders
-     → Full order history (admin tools / ops)
   ====================================================== */
   if (pathname === "/admin/orders" && method === "GET") {
     requireAdmin(req);
@@ -134,7 +135,6 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
 
     const orderId = pathname.split("/")[3];
 
-    /* ---------- Load order ---------- */
     const { rows } = await pool.query(
       `SELECT * FROM orders WHERE id = $1`,
       [orderId]
@@ -157,10 +157,8 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return true;
     }
 
-    /* ---------- Create Stripe Checkout ---------- */
     const session = await createPaymentSession(order);
 
-    /* ---------- Persist Stripe metadata ---------- */
     await pool.query(
       `
       UPDATE orders
@@ -173,7 +171,6 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       [order.id, session.id, session.url]
     );
 
-    /* ---------- Email customer ---------- */
     await sendCustomerPaymentLink({
       to: order.customer_email,
       paymentLink: session.url,

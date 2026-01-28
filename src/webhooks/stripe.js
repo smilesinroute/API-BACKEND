@@ -1,17 +1,15 @@
 "use strict";
 
 const Stripe = require("stripe");
+const { assignDriver } = require("../drivers/driverAssignments");
 
 /**
  * Stripe webhook handler
  *
- * Requirements:
- * - MUST read raw body
- * - MUST verify Stripe signature before parsing JSON
- * - MUST be idempotent (Stripe may retry events)
- *
- * Lifecycle responsibility:
- * approved_pending_payment  →  paid
+ * Responsibilities:
+ * - Verify Stripe signature
+ * - Mark order as paid (idempotent)
+ * - Automatically assign driver (reusing existing logic)
  */
 async function handleStripeWebhook(req, res, pool) {
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -23,7 +21,7 @@ async function handleStripeWebhook(req, res, pool) {
   }
 
   /* ===============================
-     READ RAW BODY (NO JSON PARSE)
+     READ RAW BODY
   =============================== */
   let rawBody;
   try {
@@ -40,7 +38,7 @@ async function handleStripeWebhook(req, res, pool) {
   }
 
   /* ===============================
-     VERIFY STRIPE SIGNATURE
+     VERIFY SIGNATURE
   =============================== */
   let event;
   try {
@@ -59,50 +57,85 @@ async function handleStripeWebhook(req, res, pool) {
      HANDLE EVENTS
   =============================== */
   try {
-    switch (event.type) {
-      case "checkout.session.completed": {
-        const session = event.data.object;
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+      const orderId = session.metadata?.order_id;
 
-        const orderId = session.metadata?.order_id;
-        if (!orderId) {
-          console.error("[STRIPE] Missing order_id in session metadata");
-          res.statusCode = 400;
-          return res.end("Missing order_id metadata");
-        }
-
-        /**
-         * IMPORTANT:
-         * - Stripe may retry webhooks
-         * - We only transition if not already paid
-         */
-        const result = await pool.query(
-          `
-          UPDATE orders
-          SET
-            payment_status = 'paid',
-            paid_at = NOW(),
-            status = 'paid'
-          WHERE id = $1
-            AND payment_status IS DISTINCT FROM 'paid'
-          RETURNING id
-          `,
-          [orderId]
-        );
-
-        if (result.rowCount === 0) {
-          console.log(
-            `[STRIPE] Order ${orderId} already marked as paid (idempotent skip)`
-          );
-        } else {
-          console.log(`✅ Order ${orderId} transitioned to PAID`);
-        }
-
-        break;
+      if (!orderId) {
+        console.error("[STRIPE] Missing order_id in metadata");
+        res.statusCode = 400;
+        return res.end("Missing order_id metadata");
       }
 
-      default:
-        // We acknowledge all events, even if unused
-        console.log(`[STRIPE] Ignored event type: ${event.type}`);
+      /* ---------- Mark paid (idempotent) ---------- */
+      const paidResult = await pool.query(
+        `
+        UPDATE orders
+        SET
+          payment_status = 'paid',
+          paid_at = NOW(),
+          status = 'paid'
+        WHERE id = $1
+          AND payment_status IS DISTINCT FROM 'paid'
+        RETURNING id, assigned_driver_id
+        `,
+        [orderId]
+      );
+
+      if (paidResult.rowCount === 0) {
+        console.log(
+          `[STRIPE] Order ${orderId} already paid — skipping payment transition`
+        );
+      } else {
+        console.log(`✅ Order ${orderId} marked as PAID`);
+      }
+
+      /* ---------- Check assignment ---------- */
+      const { rows } = await pool.query(
+        `
+        SELECT assigned_driver_id
+        FROM orders
+        WHERE id = $1
+        `,
+        [orderId]
+      );
+
+      if (!rows.length) {
+        throw new Error("Order not found after payment");
+      }
+
+      if (rows[0].assigned_driver_id) {
+        console.log(
+          `[DISPATCH] Order ${orderId} already has driver — skipping assignment`
+        );
+      } else {
+        /* ---------- Select available driver ---------- */
+        const driverResult = await pool.query(
+          `
+          SELECT id
+          FROM drivers
+          WHERE active = true
+          ORDER BY last_assigned_at NULLS FIRST, created_at ASC
+          LIMIT 1
+          `
+        );
+
+        if (!driverResult.rows.length) {
+          console.warn(
+            `[DISPATCH] No available drivers for order ${orderId}`
+          );
+        } else {
+          const driverId = driverResult.rows[0].id;
+
+          await assignDriver(pool, orderId, driverId);
+
+          console.log(
+            `🚚 Driver ${driverId} automatically assigned to order ${orderId}`
+          );
+        }
+      }
+    } else {
+      console.log(`[STRIPE] Ignored event type: ${event.type}`);
     }
   } catch (err) {
     console.error("[STRIPE] Webhook processing error:", err);
