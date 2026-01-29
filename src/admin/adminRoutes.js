@@ -5,31 +5,34 @@ const { sendCustomerPaymentLink } = require("../lib/dispatchEmails");
 const { createPaymentSession } = require("../lib/stripeCheckout");
 
 /**
- * ADMIN ROUTES
- * =============
- * Dispatch / Admin control surface
+ * ======================================================
+ * ADMIN ROUTES — AUTHORITATIVE DISPATCH CONTROL
+ * ======================================================
  *
- * Order lifecycle (authoritative):
+ * Order lifecycle (single source of truth):
+ *
  * confirmed_pending_payment  → admin approval required
  * approved_pending_payment   → awaiting customer payment
  * paid                       → payment confirmed
- * assigned                   → driver assigned (automatic or manual)
+ * assigned                   → driver assigned
  * in_progress                → driver accepted / started
  * completed                  → finished
  * rejected                   → admin rejected
+ *
+ * Rules:
+ * - Orders NEVER disappear
+ * - Email is a side-effect (never blocks)
+ * - Stripe success ≠ email success
  */
 
 async function handleAdminRoutes(req, res, pool, pathname, method, json) {
-
   /* ======================================================
-     DASHBOARD
+     DASHBOARD SNAPSHOT
      GET /admin/dashboard
-     → Authoritative dispatch snapshot
   ====================================================== */
   if (pathname === "/admin/dashboard" && method === "GET") {
     requireAdmin(req);
 
-    /* ---------- Load active (non-final) orders ---------- */
     const { rows: orders } = await pool.query(`
       SELECT
         id,
@@ -45,7 +48,6 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       ORDER BY created_at ASC
     `);
 
-    /* ---------- Group orders into lifecycle lanes ---------- */
     const lanes = {
       action_required: [],
       awaiting_payment: [],
@@ -70,12 +72,8 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       }
     }
 
-    /* ---------- Supporting stats ---------- */
     const [driversRes, revenueRes] = await Promise.all([
-      pool.query(`
-        SELECT COUNT(*)::int AS count
-        FROM drivers
-      `),
+      pool.query(`SELECT COUNT(*)::int AS count FROM drivers`),
       pool.query(`
         SELECT COALESCE(SUM(total_amount), 0)::numeric AS total
         FROM orders
@@ -104,7 +102,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   }
 
   /* ======================================================
-     LIST ORDERS
+     LIST ALL ORDERS (OPS / AUDIT)
      GET /admin/orders
   ====================================================== */
   if (pathname === "/admin/orders" && method === "GET") {
@@ -124,7 +122,8 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
      APPROVE ORDER
      POST /admin/orders/:id/approve
      → Create Stripe Checkout
-     → Email customer payment link
+     → Save payment URL
+     → Email customer (non-blocking)
   ====================================================== */
   if (
     pathname.startsWith("/admin/orders/") &&
@@ -147,18 +146,20 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return true;
     }
 
-    if (!order.customer_email) {
-      json(res, 400, { error: "Order missing customer email" });
-      return true;
-    }
-
     if (order.status !== "confirmed_pending_payment") {
       json(res, 400, { error: "Order is not in approvable state" });
       return true;
     }
 
+    if (!order.customer_email) {
+      json(res, 400, { error: "Order missing customer email" });
+      return true;
+    }
+
+    /* ---------- Stripe Checkout ---------- */
     const session = await createPaymentSession(order);
 
+    /* ---------- Persist payment metadata ---------- */
     await pool.query(
       `
       UPDATE orders
@@ -171,15 +172,22 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       [order.id, session.id, session.url]
     );
 
-    await sendCustomerPaymentLink({
+    /* ---------- Fire-and-forget email ---------- */
+    sendCustomerPaymentLink({
       to: order.customer_email,
       paymentLink: session.url,
       order,
+    }).catch(err => {
+      console.error("[EMAIL] Payment link send failed", {
+        orderId: order.id,
+        email: order.customer_email,
+        error: err.message,
+      });
     });
 
     json(res, 200, {
       success: true,
-      message: "Payment link sent to customer",
+      message: "Order approved and payment link generated",
       orderId: order.id,
     });
 

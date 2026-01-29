@@ -2,52 +2,65 @@
 
 const { sendMail } = require("./mailer");
 
-/**
- * Notify dispatch that a new courier order needs review
- */
-async function sendDispatchNotification(order) {
-  const {
-    id,
-    pickup_address,
-    delivery_address,
-    scheduled_date,
-    scheduled_time,
-    total_amount,
-  } = order;
+/* ======================================================
+   INTERNAL TIMEOUT WRAPPER
+====================================================== */
 
+function withTimeout(promise, ms, label = "operation") {
+  let timeoutId;
+
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    clearTimeout(timeoutId);
+  });
+}
+
+/* ======================================================
+   DISPATCH NOTIFICATION
+====================================================== */
+
+async function sendDispatchNotification(order) {
   if (!process.env.DISPATCH_EMAIL) {
     throw new Error("Missing DISPATCH_EMAIL env variable");
   }
 
-  return sendMail({
+  const mailPromise = sendMail({
     to: process.env.DISPATCH_EMAIL,
-    subject: `🚚 New Courier Request #${id}`,
+    subject: `🚚 New Courier Request #${order.id}`,
     text: `
 A new courier request has been submitted and requires dispatch review.
 
 Pickup:
-${pickup_address}
+${order.pickup_address}
 
 Delivery:
-${delivery_address}
+${order.delivery_address}
 
 Scheduled:
-${scheduled_date} at ${scheduled_time}
+${order.scheduled_date} at ${order.scheduled_time}
 
 Total:
-$${Number(total_amount).toFixed(2)}
+$${Number(order.total_amount).toFixed(2)}
 
 Order ID:
-${id}
+${order.id}
     `.trim(),
   });
+
+  return withTimeout(mailPromise, 5_000, "Dispatch email");
 }
 
-/**
- * Send customer a payment link after dispatch approval
- */
+/* ======================================================
+   CUSTOMER PAYMENT LINK
+====================================================== */
+
 async function sendCustomerPaymentLink({ to, paymentLink, order }) {
-  return sendMail({
+  const mailPromise = sendMail({
     to,
     subject: "Your Courier Delivery – Payment Required",
     text: `
@@ -71,6 +84,8 @@ ${paymentLink}
 Once payment is received, dispatch will assign your driver.
     `.trim(),
   });
+
+  return withTimeout(mailPromise, 5_000, "Customer payment email");
 }
 
 module.exports = {
