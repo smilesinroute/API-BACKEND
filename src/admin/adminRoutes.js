@@ -18,14 +18,10 @@ const { createPaymentSession } = require("../lib/stripeCheckout");
  * in_progress                → driver accepted / started
  * completed                  → finished
  * rejected                   → admin rejected
- *
- * Rules:
- * - Orders NEVER disappear
- * - Email is a side-effect (never blocks)
- * - Stripe success ≠ email success
  */
 
 async function handleAdminRoutes(req, res, pool, pathname, method, json) {
+
   /* ======================================================
      DASHBOARD SNAPSHOT
      GET /admin/dashboard
@@ -35,17 +31,19 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
 
     const { rows: orders } = await pool.query(`
       SELECT
-        id,
-        status,
-        pickup_address,
-        delivery_address,
-        scheduled_date,
-        scheduled_time,
-        total_amount,
-        created_at
-      FROM orders
-      WHERE status NOT IN ('completed', 'rejected')
-      ORDER BY created_at ASC
+        o.order_id AS id,
+        o.status,
+        o.pickup_address,
+        o.delivery_address,
+        o.scheduled_date,
+        o.scheduled_time,
+        o.total_cost AS total_amount,
+        o.created_at,
+        c.email AS customer_email
+      FROM orders o
+      JOIN customers c ON o.customer_id = c.customer_id
+      WHERE o.status NOT IN ('completed', 'rejected')
+      ORDER BY o.created_at ASC
     `);
 
     const lanes = {
@@ -75,7 +73,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     const [driversRes, revenueRes] = await Promise.all([
       pool.query(`SELECT COUNT(*)::int AS count FROM drivers`),
       pool.query(`
-        SELECT COALESCE(SUM(total_amount), 0)::numeric AS total
+        SELECT COALESCE(SUM(total_cost), 0)::numeric AS total
         FROM orders
         WHERE payment_status = 'paid'
           AND paid_at IS NOT NULL
@@ -109,9 +107,12 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     requireAdmin(req);
 
     const { rows } = await pool.query(`
-      SELECT *
-      FROM orders
-      ORDER BY created_at DESC
+      SELECT
+        o.*,
+        c.email AS customer_email
+      FROM orders o
+      JOIN customers c ON o.customer_id = c.customer_id
+      ORDER BY o.created_at DESC
     `);
 
     json(res, 200, { orders: rows });
@@ -135,7 +136,14 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     const orderId = pathname.split("/")[3];
 
     const { rows } = await pool.query(
-      `SELECT * FROM orders WHERE id = $1`,
+      `
+      SELECT
+        o.*,
+        c.email AS customer_email
+      FROM orders o
+      JOIN customers c ON o.customer_id = c.customer_id
+      WHERE o.order_id = $1
+      `,
       [orderId]
     );
 
@@ -152,7 +160,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     }
 
     if (!order.customer_email) {
-      json(res, 400, { error: "Order missing customer email" });
+      json(res, 400, { error: "Customer email missing" });
       return true;
     }
 
@@ -167,9 +175,9 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         status = 'approved_pending_payment',
         stripe_session_id = $2,
         stripe_checkout_url = $3
-      WHERE id = $1
+      WHERE order_id = $1
       `,
-      [order.id, session.id, session.url]
+      [order.order_id, session.id, session.url]
     );
 
     /* ---------- Fire-and-forget email ---------- */
@@ -179,7 +187,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       order,
     }).catch(err => {
       console.error("[EMAIL] Payment link send failed", {
-        orderId: order.id,
+        orderId: order.order_id,
         email: order.customer_email,
         error: err.message,
       });
@@ -188,7 +196,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     json(res, 200, {
       success: true,
       message: "Order approved and payment link generated",
-      orderId: order.id,
+      orderId: order.order_id,
     });
 
     return true;
@@ -211,7 +219,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       `
       UPDATE orders
       SET status = 'rejected'
-      WHERE id = $1
+      WHERE order_id = $1
       `,
       [orderId]
     );
@@ -224,3 +232,4 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
 }
 
 module.exports = { handleAdminRoutes };
+
