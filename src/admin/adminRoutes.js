@@ -9,15 +9,16 @@ const { createPaymentSession } = require("../lib/stripeCheckout");
  * ADMIN ROUTES — AUTHORITATIVE DISPATCH CONTROL
  * ======================================================
  *
- * Order lifecycle (single source of truth):
+ * Single source of truth: orders table
  *
- * confirmed_pending_payment  → admin approval required
- * approved_pending_payment   → awaiting customer payment
- * paid                       → payment confirmed
- * assigned                   → driver assigned
- * in_progress                → driver accepted / started
- * completed                  → finished
- * rejected                   → admin rejected
+ * Order lifecycle:
+ * confirmed_pending_payment → admin approval required
+ * approved_pending_payment  → awaiting customer payment
+ * paid                      → payment confirmed
+ * assigned                  → driver assigned
+ * in_progress               → driver started
+ * completed                 → finished
+ * rejected                  → admin rejected
  */
 
 async function handleAdminRoutes(req, res, pool, pathname, method, json) {
@@ -31,19 +32,18 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
 
     const { rows: orders } = await pool.query(`
       SELECT
-        o.order_id AS id,
-        o.status,
-        o.pickup_address,
-        o.delivery_address,
-        o.scheduled_date,
-        o.scheduled_time,
-        o.total_cost AS total_amount,
-        o.created_at,
-        c.email AS customer_email
-      FROM orders o
-      JOIN customers c ON o.customer_id = c.customer_id
-      WHERE o.status NOT IN ('completed', 'rejected')
-      ORDER BY o.created_at ASC
+        id,
+        status,
+        pickup_address,
+        delivery_address,
+        scheduled_date,
+        scheduled_time,
+        total_amount,
+        customer_email,
+        created_at
+      FROM orders
+      WHERE status NOT IN ('completed', 'rejected')
+      ORDER BY created_at ASC
     `);
 
     const lanes = {
@@ -73,7 +73,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     const [driversRes, revenueRes] = await Promise.all([
       pool.query(`SELECT COUNT(*)::int AS count FROM drivers`),
       pool.query(`
-        SELECT COALESCE(SUM(total_cost), 0)::numeric AS total
+        SELECT COALESCE(SUM(total_amount), 0)::numeric AS total
         FROM orders
         WHERE payment_status = 'paid'
           AND paid_at IS NOT NULL
@@ -100,19 +100,16 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   }
 
   /* ======================================================
-     LIST ALL ORDERS (OPS / AUDIT)
+     LIST ALL ORDERS
      GET /admin/orders
   ====================================================== */
   if (pathname === "/admin/orders" && method === "GET") {
     requireAdmin(req);
 
     const { rows } = await pool.query(`
-      SELECT
-        o.*,
-        c.email AS customer_email
-      FROM orders o
-      JOIN customers c ON o.customer_id = c.customer_id
-      ORDER BY o.created_at DESC
+      SELECT *
+      FROM orders
+      ORDER BY created_at DESC
     `);
 
     json(res, 200, { orders: rows });
@@ -122,9 +119,6 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   /* ======================================================
      APPROVE ORDER
      POST /admin/orders/:id/approve
-     → Create Stripe Checkout
-     → Save payment URL
-     → Email customer (non-blocking)
   ====================================================== */
   if (
     pathname.startsWith("/admin/orders/") &&
@@ -136,14 +130,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     const orderId = pathname.split("/")[3];
 
     const { rows } = await pool.query(
-      `
-      SELECT
-        o.*,
-        c.email AS customer_email
-      FROM orders o
-      JOIN customers c ON o.customer_id = c.customer_id
-      WHERE o.order_id = $1
-      `,
+      `SELECT * FROM orders WHERE id = $1`,
       [orderId]
     );
 
@@ -164,10 +151,8 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return true;
     }
 
-    /* ---------- Stripe Checkout ---------- */
     const session = await createPaymentSession(order);
 
-    /* ---------- Persist payment metadata ---------- */
     await pool.query(
       `
       UPDATE orders
@@ -175,20 +160,19 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         status = 'approved_pending_payment',
         stripe_session_id = $2,
         stripe_checkout_url = $3
-      WHERE order_id = $1
+      WHERE id = $1
       `,
-      [order.order_id, session.id, session.url]
+      [order.id, session.id, session.url]
     );
 
-    /* ---------- Fire-and-forget email ---------- */
+    // fire-and-forget email (never blocks approval)
     sendCustomerPaymentLink({
       to: order.customer_email,
       paymentLink: session.url,
       order,
     }).catch(err => {
-      console.error("[EMAIL] Payment link send failed", {
-        orderId: order.order_id,
-        email: order.customer_email,
+      console.error("[EMAIL] Payment link failed", {
+        orderId: order.id,
         error: err.message,
       });
     });
@@ -196,7 +180,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     json(res, 200, {
       success: true,
       message: "Order approved and payment link generated",
-      orderId: order.order_id,
+      orderId: order.id,
     });
 
     return true;
@@ -216,11 +200,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     const orderId = pathname.split("/")[3];
 
     await pool.query(
-      `
-      UPDATE orders
-      SET status = 'rejected'
-      WHERE order_id = $1
-      `,
+      `UPDATE orders SET status = 'rejected' WHERE id = $1`,
       [orderId]
     );
 
@@ -232,4 +212,3 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
 }
 
 module.exports = { handleAdminRoutes };
-
