@@ -4,23 +4,6 @@ const { requireAdmin } = require("./adminAuth");
 const { sendCustomerPaymentLink } = require("../lib/dispatchEmails");
 const { createPaymentSession } = require("../lib/stripeCheckout");
 
-/**
- * ======================================================
- * ADMIN ROUTES — AUTHORITATIVE DISPATCH CONTROL
- * ======================================================
- *
- * Single source of truth: orders table
- *
- * Order lifecycle:
- * confirmed_pending_payment → admin approval required
- * approved_pending_payment  → awaiting customer payment
- * paid                      → payment confirmed
- * assigned                  → driver assigned
- * in_progress               → driver started
- * completed                 → finished
- * rejected                  → admin rejected
- */
-
 async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   try {
     /* ======================================================
@@ -28,7 +11,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
        GET /admin/dashboard
     ====================================================== */
     if (pathname === "/admin/dashboard" && method === "GET") {
-      requireAdmin(req);
+      if (!requireAdmin(req, res, json)) return true;
 
       const { rows: orders } = await pool.query(`
         SELECT
@@ -100,7 +83,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
        GET /admin/orders
     ====================================================== */
     if (pathname === "/admin/orders" && method === "GET") {
-      requireAdmin(req);
+      if (!requireAdmin(req, res, json)) return true;
 
       const { rows } = await pool.query(`
         SELECT *
@@ -121,7 +104,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       pathname.endsWith("/approve") &&
       method === "POST"
     ) {
-      requireAdmin(req);
+      if (!requireAdmin(req, res, json)) return true;
 
       const orderId = pathname.split("/")[3];
 
@@ -160,7 +143,6 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         [order.id, session.id, session.url]
       );
 
-      // fire-and-forget email (never blocks approval)
       sendCustomerPaymentLink({
         to: order.customer_email,
         paymentLink: session.url,
@@ -190,7 +172,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       pathname.endsWith("/reject") &&
       method === "POST"
     ) {
-      requireAdmin(req);
+      if (!requireAdmin(req, res, json)) return true;
 
       const orderId = pathname.split("/")[3];
 

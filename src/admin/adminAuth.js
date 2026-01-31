@@ -1,43 +1,46 @@
 "use strict";
 
 /**
- * ADMIN AUTH GUARD
- * =================
- * Protects admin / dispatch endpoints
- * - Expects: Authorization: Bearer <ADMIN_API_KEY>
- * - Throws structured errors for clean HTTP responses
+ * ADMIN AUTH GUARD (MANUAL ROUTER)
+ * ===============================
+ * Designed for non-Express routing
+ *
+ * Expects:
+ *   Authorization: Bearer <ADMIN_API_KEY>
+ *
+ * Returns:
+ *   true  → authorized
+ *   false → response already sent
  */
 
-function requireAdmin(req) {
+function requireAdmin(req, res, json) {
   const authHeader = req.headers?.authorization;
 
   if (!authHeader) {
-    const err = new Error("Missing Authorization header");
-    err.statusCode = 401;
-    throw err;
+    json(res, 401, { error: "Missing Authorization header" });
+    return false;
   }
 
   if (!authHeader.startsWith("Bearer ")) {
-    const err = new Error("Malformed Authorization header");
-    err.statusCode = 401;
-    throw err;
+    json(res, 401, { error: "Malformed Authorization header" });
+    return false;
   }
 
   const token = authHeader.slice(7).trim();
 
   if (!process.env.ADMIN_API_KEY) {
-    const err = new Error("Admin API key not configured on server");
-    err.statusCode = 500;
-    throw err;
+    json(res, 500, {
+      error: "Admin API key not configured on server",
+    });
+    return false;
   }
 
-  if (token !== process.env.ADMIN_API_KEY) {
-    const err = new Error("Invalid admin token");
-    err.statusCode = 403;
-    throw err;
+  if (token !== process.env.ADMIN_API_KEY.trim()) {
+    json(res, 403, { error: "Invalid admin token" });
+    return false;
   }
 
-  // Authorized — continue
+  // ✅ Authorized
   return true;
 }
 
