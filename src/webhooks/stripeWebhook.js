@@ -1,19 +1,19 @@
 "use strict";
 
-const crypto = require("crypto");
 const Stripe = require("stripe");
-
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 /**
  * Stripe webhook handler
- * - Verifies signature
- * - Marks order as paid
+ * - Verifies Stripe signature using raw body
+ * - Marks order as paid on checkout.session.completed
  */
 async function handleStripeWebhook(req, res, pool) {
+  // Only accept POST
   if (req.method !== "POST") return false;
 
-  if (!req.url.startsWith("/api/webhooks/stripe")) {
+  // ✅ FIXED PATH (must match Stripe dashboard exactly)
+  if (!req.url.startsWith("/api/webhook/stripe")) {
     return false;
   }
 
@@ -24,6 +24,7 @@ async function handleStripeWebhook(req, res, pool) {
     return true;
   }
 
+  // Read RAW body (required by Stripe)
   let rawBody = "";
   for await (const chunk of req) {
     rawBody += chunk;
@@ -43,13 +44,15 @@ async function handleStripeWebhook(req, res, pool) {
     return true;
   }
 
-  // ✅ Only care about successful checkout
+  console.log("[STRIPE] Webhook received:", event.type);
+
+  // Handle successful checkout
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
-
     const orderId = session.metadata?.order_id;
+
     if (!orderId) {
-      console.warn("[STRIPE] Missing order_id metadata");
+      console.warn("[STRIPE] checkout.session.completed missing order_id");
     } else {
       await pool.query(
         `
@@ -62,10 +65,11 @@ async function handleStripeWebhook(req, res, pool) {
         [orderId]
       );
 
-      console.log("[STRIPE] Order marked paid:", orderId);
+      console.log("[STRIPE] Order marked as paid:", orderId);
     }
   }
 
+  // ✅ Always acknowledge Stripe
   res.statusCode = 200;
   res.end("ok");
   return true;
