@@ -4,8 +4,8 @@
  * Smiles in Route — Core API Router
  * =================================
  * - Plain Node.js HTTP routing (NO Express)
- * - Shared Postgres pool (passed from server.js)
- * - Public + Admin + Driver routes
+ * - Shared Postgres pool
+ * - Customer + Admin + Driver routes
  */
 
 const url = require("url");
@@ -45,14 +45,14 @@ function text(res, status, message) {
 }
 
 /* ======================================================
-   BODY PARSING (RAW NODE)
+   BODY PARSING
 ====================================================== */
 function readBody(req, limit = 1_000_000) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
 
-    req.on("data", (chunk) => {
+    req.on("data", chunk => {
       size += chunk.length;
       if (size > limit) {
         req.destroy();
@@ -62,7 +62,9 @@ function readBody(req, limit = 1_000_000) {
       chunks.push(chunk);
     });
 
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () =>
+      resolve(Buffer.concat(chunks).toString("utf8"))
+    );
     req.on("error", reject);
   });
 }
@@ -79,7 +81,7 @@ async function readJson(req) {
 /* ======================================================
    VALIDATION HELPERS
 ====================================================== */
-const str = (v) => String(v ?? "").trim();
+const str = v => String(v ?? "").trim();
 
 function num(v, label) {
   const n = Number(v);
@@ -110,7 +112,9 @@ function generateTimeSlots() {
   const slots = [];
   for (let h = 8; h < 18; h++) {
     for (let m = 0; m < 60; m += 30) {
-      slots.push(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
+      slots.push(
+        `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
+      );
     }
   }
   return slots;
@@ -123,7 +127,7 @@ async function handleAPI(req, res, pool) {
   const { pathname } = url.parse(req.url, true);
   const method = req.method;
 
-  /* ---------- CORS (NODE 22 SAFE) ---------- */
+  /* ---------- CORS ---------- */
   const origin = req.headers.origin;
   const allowedOrigins = [
     process.env.ADMIN_ORIGIN,
@@ -131,19 +135,23 @@ async function handleAPI(req, res, pool) {
     "https://admin.smilesinroute.delivery",
   ].filter(Boolean);
 
-  if (origin && allowedOrigins.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  } else {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  }
-
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    origin && allowedOrigins.includes(origin) ? origin : "*"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,OPTIONS"
+  );
 
   if (method === "OPTIONS") return res.end();
 
   /* ======================================================
-     DRIVER ROUTES (FIRST)
+     DRIVER ROUTES
   ====================================================== */
   try {
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
@@ -185,7 +193,10 @@ async function handleAPI(req, res, pool) {
   if (pathname.startsWith("/api/available-slots/") && method === "GET") {
     try {
       const date = isoDate(pathname.split("/").pop());
-      return json(res, 200, { date, availableSlots: generateTimeSlots() });
+      return json(res, 200, {
+        date,
+        availableSlots: generateTimeSlots(),
+      });
     } catch (err) {
       return json(res, 400, { error: err.message });
     }
@@ -198,9 +209,7 @@ async function handleAPI(req, res, pool) {
     try {
       const body = await readJson(req);
       if (!body.pickup || !body.delivery) {
-        return json(res, 400, {
-          error: "pickup and delivery addresses required",
-        });
+        throw new Error("pickup and delivery required");
       }
 
       const miles = await getDistanceMiles(body.pickup, body.delivery);
@@ -239,7 +248,7 @@ async function handleAPI(req, res, pool) {
   }
 
   /* ======================================================
-     CONFIRM ORDER (CUSTOMER)
+     CONFIRM ORDER (CUSTOMER → DATABASE)
   ====================================================== */
   if (pathname === "/api/confirm" && method === "POST") {
     try {
@@ -247,32 +256,38 @@ async function handleAPI(req, res, pool) {
 
       const pickup = str(body.pickup_address);
       const delivery = str(body.delivery_address);
+      const email = str(body.customer_email);
 
       if (!pickup || !delivery) {
         throw new Error("pickup_address and delivery_address required");
       }
+
+      if (!email) {
+        throw new Error("customer_email required");
+      }
+
+      const total = num(body.total_amount, "total_amount");
+      const miles = num(body.distance_miles, "distance_miles");
+      const date = isoDate(body.scheduled_date);
+      const time = hhmm(body.scheduled_time);
 
       const { rows } = await pool.query(
         `
         INSERT INTO orders (
           pickup_address,
           delivery_address,
+          customer_email,
           service_type,
+          distance_miles,
           total_amount,
           scheduled_date,
           scheduled_time,
           status
         )
-        VALUES ($1,$2,'courier',$3,$4,$5,'confirmed_pending_payment')
+        VALUES ($1,$2,$3,'courier',$4,$5,$6,$7,'confirmed_pending_payment')
         RETURNING id
         `,
-        [
-          pickup,
-          delivery,
-          num(body.total_amount, "total_amount"),
-          isoDate(body.scheduled_date),
-          hhmm(body.scheduled_time),
-        ]
+        [pickup, delivery, email, miles, total, date, time]
       );
 
       return json(res, 201, {
