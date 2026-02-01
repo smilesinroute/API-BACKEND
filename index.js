@@ -4,9 +4,9 @@
  * Smiles in Route — Core API Router (Production)
  * =============================================
  * - Plain Node.js HTTP routing (NO Express)
- * - Shared Postgres pool (passed from server.js)
- * - Public + Admin + Driver routes
- * - Stripe webhook runs FIRST (raw body required)
+ * - Shared Postgres pool
+ * - Stripe webhook handled FIRST (raw body required)
+ * - Admin + Driver + Public endpoints
  */
 
 const url = require("url");
@@ -94,17 +94,19 @@ function num(v, label) {
 }
 
 function isoDate(v) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || ""))) {
+  const s = String(v || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     throw new Error("scheduled_date must be YYYY-MM-DD");
   }
-  return v;
+  return s;
 }
 
 function hhmm(v) {
-  if (!/^\d{2}:\d{2}$/.test(String(v || ""))) {
+  const s = String(v || "");
+  if (!/^\d{2}:\d{2}$/.test(s)) {
     throw new Error("scheduled_time must be HH:MM");
   }
-  return v;
+  return s;
 }
 
 /* ======================================================
@@ -121,12 +123,11 @@ function generateTimeSlots() {
 }
 
 /* ======================================================
-   CORS (SAFE DEFAULTS)
+   CORS
 ====================================================== */
 function applyCors(req, res) {
   const origin = req.headers.origin;
 
-  // Allow-list for production + local dev
   const allowedOrigins = [
     process.env.ADMIN_ORIGIN,
     process.env.CUSTOMER_ORIGIN,
@@ -136,7 +137,6 @@ function applyCors(req, res) {
 
     "https://smilesinroute.delivery",
     "https://www.smilesinroute.delivery",
-
     "https://admin.smilesinroute.delivery",
   ].filter(Boolean);
 
@@ -144,16 +144,19 @@ function applyCors(req, res) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   } else {
-    // Public API endpoints (distance/quote) can be ok on *
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Stripe-Signature");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Stripe-Signature"
+  );
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 }
 
 /* ======================================================
-   CORE: ORDER INSERT (USED BY /api/confirm AND /api/orders)
+   CORE: ORDER INSERT
+   (USED BY /api/orders AND /api/confirm)
 ====================================================== */
 async function createCourierOrder(pool, body) {
   const pickup = str(body.pickup_address);
@@ -164,16 +167,14 @@ async function createCourierOrder(pool, body) {
     throw new Error("pickup_address and delivery_address required");
   }
 
-  // Scheduled fields required for “real” orders
-  // (Your flow schedules on the schedule step)
   const scheduledDate = isoDate(body.scheduled_date);
   const scheduledTime = hhmm(body.scheduled_time);
-
   const totalAmount = num(body.total_amount, "total_amount");
 
-  // Keep status aligned with admin “Requires Approval” lane
+  // Align with admin "Requires Approval"
   const status = "confirmed_pending_payment";
 
+  // ✅ FIXED: placeholder count matches params (7 params + literal 'courier' = 8 values)
   const { rows } = await pool.query(
     `
     INSERT INTO orders (
@@ -186,7 +187,7 @@ async function createCourierOrder(pool, body) {
       customer_email,
       status
     )
-    VALUES ($1,$2,'courier',$3,$4,$5,$6,$7)
+    VALUES ($1, $2, 'courier', $3, $4, $5, $6, $7)
     RETURNING id, status
     `,
     [pickup, delivery, totalAmount, scheduledDate, scheduledTime, email || null, status]
@@ -199,9 +200,26 @@ async function createCourierOrder(pool, body) {
    MAIN API ROUTER
 ====================================================== */
 async function handleAPI(req, res, pool) {
-  const { pathname } = url.parse(req.url, true);
-  const method = req.method;
+  const method = req.method || "GET";
+  const rawUrl = String(req.url || "/");
 
+  /* ======================================================
+     STRIPE WEBHOOK (ABSOLUTELY FIRST)
+     POST /api/webhook/stripe
+     - Must be before CORS + before body parsing
+  ====================================================== */
+  if (rawUrl.startsWith("/api/webhook/stripe")) {
+    try {
+      const handled = await handleStripeWebhook(req, res, pool);
+      if (handled) return;
+      // If not handled, fall through and return 404 below
+    } catch (err) {
+      console.error("[STRIPE WEBHOOK]", err);
+      return json(res, 500, { error: "Webhook error" });
+    }
+  }
+
+  // Safe for all non-webhook routes
   applyCors(req, res);
 
   if (method === "OPTIONS") {
@@ -209,17 +227,7 @@ async function handleAPI(req, res, pool) {
     return res.end();
   }
 
-  /* ======================================================
-     STRIPE WEBHOOK (FIRST - RAW BODY)
-     POST /api/webhook/stripe
-  ====================================================== */
-  try {
-    const handled = await handleStripeWebhook(req, res, pool);
-    if (handled) return;
-  } catch (err) {
-    console.error("[STRIPE WEBHOOK]", err);
-    return json(res, 500, { error: "Webhook error" });
-  }
+  const { pathname } = url.parse(rawUrl, true);
 
   /* ======================================================
      DRIVER ROUTES
@@ -241,12 +249,13 @@ async function handleAPI(req, res, pool) {
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
   } catch (err) {
     console.error("[ADMIN ROUTING]", err);
-    return json(res, err.statusCode || 500, { error: err.message || "Admin error" });
+    return json(res, err.statusCode || 500, {
+      error: err.message || "Admin error",
+    });
   }
 
   /* ======================================================
      HEALTH CHECK
-     GET /api/health
   ====================================================== */
   if (pathname === "/api/health" && method === "GET") {
     try {
@@ -259,7 +268,6 @@ async function handleAPI(req, res, pool) {
 
   /* ======================================================
      AVAILABLE TIME SLOTS
-     GET /api/available-slots/:date
   ====================================================== */
   if (pathname.startsWith("/api/available-slots/") && method === "GET") {
     try {
@@ -272,7 +280,6 @@ async function handleAPI(req, res, pool) {
 
   /* ======================================================
      DISTANCE
-     POST /api/distance
   ====================================================== */
   if (pathname === "/api/distance" && method === "POST") {
     try {
@@ -289,7 +296,6 @@ async function handleAPI(req, res, pool) {
 
   /* ======================================================
      QUOTE
-     POST /api/quote
   ====================================================== */
   if (pathname === "/api/quote" && method === "POST") {
     try {
@@ -318,19 +324,17 @@ async function handleAPI(req, res, pool) {
 
   /* ======================================================
      CREATE ORDER (CUSTOMER)
-     POST /api/orders   ✅ (your customer UI is calling this)
-     POST /api/confirm  ✅ (keep old route too)
+     POST /api/orders
+     POST /api/confirm (legacy)
   ====================================================== */
   if ((pathname === "/api/orders" || pathname === "/api/confirm") && method === "POST") {
     try {
       const body = await readJson(req);
-
       const created = await createCourierOrder(pool, body);
 
-      // IMPORTANT: return BOTH keys to avoid frontend mismatch
       return json(res, 201, {
-        orderId: created.id,     // ✅ some frontends expect this
-        order_id: created.id,    // ✅ your older code expects this
+        orderId: created.id,
+        order_id: created.id,
         status: created.status,
       });
     } catch (err) {
