@@ -4,6 +4,36 @@ const { requireAdmin } = require("./adminAuth");
 const { sendCustomerPaymentLink } = require("../lib/dispatchEmails");
 const { createPaymentSession } = require("../lib/stripeCheckout");
 
+/**
+ * ======================================================
+ * ADMIN ROUTES (Production)
+ * ======================================================
+ * - Manual router (NO Express)
+ * - Auth via Authorization: Bearer <ADMIN_API_KEY>
+ * - Source of truth: orders table
+ * - Clear, safe error handling (no silent 500s)
+ */
+
+function getIdFromPath(pathname) {
+  // /admin/orders/:id/approve  OR  /admin/orders/:id/reject
+  const parts = String(pathname || "").split("/").filter(Boolean);
+  // ["admin","orders",":id","approve"]
+  return parts[2] || null;
+}
+
+function laneForStatus(status) {
+  if (status === "confirmed_pending_payment") return "action_required";
+  if (status === "approved_pending_payment") return "awaiting_payment";
+  if (status === "paid" || status === "assigned" || status === "in_progress")
+    return "active";
+  return null;
+}
+
+function safeNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   try {
     /* ======================================================
@@ -11,9 +41,10 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
        GET /admin/dashboard
     ====================================================== */
     if (pathname === "/admin/dashboard" && method === "GET") {
-      if (!requireAdmin(req, res, json)) return true;
+      requireAdmin(req);
 
-      const { rows: orders } = await pool.query(`
+      const { rows: orders } = await pool.query(
+        `
         SELECT
           id,
           status,
@@ -27,7 +58,8 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         FROM orders
         WHERE status NOT IN ('completed', 'rejected')
         ORDER BY created_at ASC
-      `);
+        `
+      );
 
       const lanes = {
         action_required: [],
@@ -35,29 +67,22 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         active: [],
       };
 
-      for (const order of orders) {
-        if (order.status === "confirmed_pending_payment") {
-          lanes.action_required.push(order);
-        } else if (order.status === "approved_pending_payment") {
-          lanes.awaiting_payment.push(order);
-        } else if (
-          order.status === "paid" ||
-          order.status === "assigned" ||
-          order.status === "in_progress"
-        ) {
-          lanes.active.push(order);
-        }
+      for (const o of orders) {
+        const lane = laneForStatus(o.status);
+        if (lane) lanes[lane].push(o);
       }
 
       const [driversRes, revenueRes] = await Promise.all([
         pool.query(`SELECT COUNT(*)::int AS count FROM drivers`),
-        pool.query(`
+        pool.query(
+          `
           SELECT COALESCE(SUM(total_amount), 0)::numeric AS total
           FROM orders
           WHERE payment_status = 'paid'
             AND paid_at IS NOT NULL
             AND paid_at::date = CURRENT_DATE
-        `),
+          `
+        ),
       ]);
 
       json(res, 200, {
@@ -83,7 +108,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
        GET /admin/orders
     ====================================================== */
     if (pathname === "/admin/orders" && method === "GET") {
-      if (!requireAdmin(req, res, json)) return true;
+      requireAdmin(req);
 
       const { rows } = await pool.query(`
         SELECT *
@@ -104,14 +129,17 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       pathname.endsWith("/approve") &&
       method === "POST"
     ) {
-      if (!requireAdmin(req, res, json)) return true;
+      requireAdmin(req);
 
-      const orderId = pathname.split("/")[3];
+      const orderId = getIdFromPath(pathname);
+      if (!orderId) {
+        json(res, 400, { error: "Missing order ID" });
+        return true;
+      }
 
-      const { rows } = await pool.query(
-        `SELECT * FROM orders WHERE id = $1`,
-        [orderId]
-      );
+      const { rows } = await pool.query(`SELECT * FROM orders WHERE id = $1`, [
+        orderId,
+      ]);
 
       const order = rows[0];
       if (!order) {
@@ -120,7 +148,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       }
 
       if (order.status !== "confirmed_pending_payment") {
-        json(res, 400, { error: "Order is not in approvable state" });
+        json(res, 400, { error: "Order is not in an approvable state" });
         return true;
       }
 
@@ -129,7 +157,25 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         return true;
       }
 
-      const session = await createPaymentSession(order);
+      // Prevent Stripe session failures from invalid totals (0, null, NaN)
+      const total = safeNumber(order.total_amount);
+      if (total === null || total <= 0) {
+        json(res, 400, { error: "Order total is invalid for payment" });
+        return true;
+      }
+
+      let session;
+      try {
+        session = await createPaymentSession(order);
+      } catch (e) {
+        // Surface the real cause instead of generic "Internal admin server error"
+        console.error("[STRIPE] createPaymentSession failed", {
+          orderId: order.id,
+          message: e?.message,
+        });
+        json(res, 500, { error: "Stripe session creation failed" });
+        return true;
+      }
 
       await pool.query(
         `
@@ -143,23 +189,19 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         [order.id, session.id, session.url]
       );
 
+      // Fire-and-forget email (do not block approval response)
       sendCustomerPaymentLink({
         to: order.customer_email,
         paymentLink: session.url,
         order,
-      }).catch(err => {
+      }).catch((err) => {
         console.error("[EMAIL] Payment link failed", {
           orderId: order.id,
-          error: err.message,
+          error: err?.message,
         });
       });
 
-      json(res, 200, {
-        success: true,
-        message: "Order approved and payment link generated",
-        orderId: order.id,
-      });
-
+      json(res, 200, { success: true, orderId: order.id });
       return true;
     }
 
@@ -172,23 +214,34 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       pathname.endsWith("/reject") &&
       method === "POST"
     ) {
-      if (!requireAdmin(req, res, json)) return true;
+      requireAdmin(req);
 
-      const orderId = pathname.split("/")[3];
+      const orderId = getIdFromPath(pathname);
+      if (!orderId) {
+        json(res, 400, { error: "Missing order ID" });
+        return true;
+      }
 
-      await pool.query(
+      const { rowCount } = await pool.query(
         `UPDATE orders SET status = 'rejected' WHERE id = $1`,
         [orderId]
       );
 
-      json(res, 200, { success: true });
+      if (!rowCount) {
+        json(res, 404, { error: "Order not found" });
+        return true;
+      }
+
+      json(res, 200, { success: true, orderId });
       return true;
     }
 
     return false;
   } catch (err) {
     console.error("[ADMIN ROUTES ERROR]", err);
-    json(res, 500, { error: "Internal admin server error" });
+    json(res, err.statusCode || 500, {
+      error: err.message || "Internal admin server error",
+    });
     return true;
   }
 }
