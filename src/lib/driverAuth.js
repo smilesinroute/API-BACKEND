@@ -2,34 +2,43 @@
 
 const crypto = require("crypto");
 
-function json(res, code, payload) {
-  res.statusCode = code;
+/* ======================================================
+   RESPONSE HELPER
+====================================================== */
+function json(res, status, payload) {
+  res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(payload));
 }
 
+/* ======================================================
+   TOKEN HELPERS
+====================================================== */
 function getBearerToken(req) {
-  const auth = String(req.headers.authorization || "");
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  return m ? m[1].trim() : "";
+  const header = String(req.headers.authorization || "");
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
 }
 
 function newToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-/**
- * Creates a driver session token row.
- * Schema we expect (we’ll add SQL below):
- * - driver_sessions(token, driver_id, selfie_verified, created_at, revoked_at)
- */
+/* ======================================================
+   DRIVER SESSION CREATION
+   TABLE: driver_sessions
+   - token (text, pk)
+   - driver_id (uuid)
+   - created_at (timestamptz)
+   - revoked_at (timestamptz)
+====================================================== */
 async function createDriverSession(pool, driverId) {
   const token = newToken();
 
   await pool.query(
     `
-    INSERT INTO driver_sessions (token, driver_id, selfie_verified)
-    VALUES ($1, $2, false)
+    INSERT INTO driver_sessions (token, driver_id)
+    VALUES ($1, $2)
     `,
     [token, driverId]
   );
@@ -37,17 +46,24 @@ async function createDriverSession(pool, driverId) {
   return token;
 }
 
-/**
- * Require a valid driver session token.
- * Optionally enforce selfie gate.
- */
+/* ======================================================
+   REQUIRE DRIVER (AUTH MIDDLEWARE)
+====================================================== */
 async function requireDriver(pool, req, { requireSelfie = true } = {}) {
   const token = getBearerToken(req);
-  if (!token) throw new Error("Missing Authorization: Bearer <token>");
 
-  const { rows } = await pool.query(
+  if (!token) {
+    const err = new Error("Missing Authorization bearer token");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  /* =========================
+     VALIDATE SESSION
+  ========================= */
+  const { rows: sessions } = await pool.query(
     `
-    SELECT token, driver_id, selfie_verified, revoked_at
+    SELECT token, driver_id, revoked_at
     FROM driver_sessions
     WHERE token = $1
     LIMIT 1
@@ -55,13 +71,55 @@ async function requireDriver(pool, req, { requireSelfie = true } = {}) {
     [token]
   );
 
-  if (!rows.length) throw new Error("Invalid driver token");
-  const session = rows[0];
+  if (!sessions.length) {
+    const err = new Error("Invalid or expired driver session");
+    err.statusCode = 401;
+    throw err;
+  }
 
-  if (session.revoked_at) throw new Error("Driver session revoked");
-  if (requireSelfie && !session.selfie_verified) throw new Error("Selfie required to proceed");
+  const session = sessions[0];
 
-  return { token: session.token, driver_id: session.driver_id, selfie_verified: session.selfie_verified };
+  if (session.revoked_at) {
+    const err = new Error("Driver session revoked");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  /* =========================
+     SELFIE ENFORCEMENT
+     SOURCE OF TRUTH:
+     driver_selfies table
+  ========================= */
+  if (requireSelfie) {
+    const { rowCount } = await pool.query(
+      `
+      SELECT 1
+      FROM driver_selfies
+      WHERE driver_id = $1
+        AND verified = true
+      LIMIT 1
+      `,
+      [session.driver_id]
+    );
+
+    if (!rowCount) {
+      const err = new Error("Driver selfie verification required");
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+
+  /* =========================
+     SUCCESS
+  ========================= */
+  return {
+    driver_id: session.driver_id,
+    token: session.token,
+  };
 }
 
-module.exports = { json, createDriverSession, requireDriver };
+module.exports = {
+  json,
+  createDriverSession,
+  requireDriver,
+};
