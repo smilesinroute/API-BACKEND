@@ -2,36 +2,32 @@
 
 const crypto = require("crypto");
 
-/* ======================================================
-   RESPONSE HELPER
-====================================================== */
-function json(res, status, payload) {
-  res.statusCode = status;
+/* =========================
+   JSON helper
+========================= */
+function json(res, code, payload) {
+  res.statusCode = code;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(payload));
 }
 
-/* ======================================================
-   TOKEN HELPERS
-====================================================== */
+/* =========================
+   Token helpers
+========================= */
 function getBearerToken(req) {
-  const header = String(req.headers.authorization || "");
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1].trim() : null;
+  const auth = String(req.headers.authorization || "");
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1].trim() : "";
 }
 
 function newToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-/* ======================================================
-   DRIVER SESSION CREATION
-   TABLE: driver_sessions
-   - token (text, pk)
-   - driver_id (uuid)
-   - created_at (timestamptz)
-   - revoked_at (timestamptz)
-====================================================== */
+/* =========================
+   Create driver session
+   TABLE: driver_sessions(token, driver_id, created_at, revoked_at)
+========================= */
 async function createDriverSession(pool, driverId) {
   const token = newToken();
 
@@ -46,21 +42,16 @@ async function createDriverSession(pool, driverId) {
   return token;
 }
 
-/* ======================================================
-   REQUIRE DRIVER (AUTH MIDDLEWARE)
-====================================================== */
+/* =========================
+   Require driver
+   - Auth via driver_sessions
+   - Selfie enforced via driver_selfies
+========================= */
 async function requireDriver(pool, req, { requireSelfie = true } = {}) {
   const token = getBearerToken(req);
+  if (!token) throw new Error("Missing Authorization token");
 
-  if (!token) {
-    const err = new Error("Missing Authorization bearer token");
-    err.statusCode = 401;
-    throw err;
-  }
-
-  /* =========================
-     VALIDATE SESSION
-  ========================= */
+  /* ---- validate session ---- */
   const { rows: sessions } = await pool.query(
     `
     SELECT token, driver_id, revoked_at
@@ -71,50 +62,33 @@ async function requireDriver(pool, req, { requireSelfie = true } = {}) {
     [token]
   );
 
-  if (!sessions.length) {
-    const err = new Error("Invalid or expired driver session");
-    err.statusCode = 401;
-    throw err;
-  }
+  if (!sessions.length) throw new Error("Invalid driver token");
 
   const session = sessions[0];
+  if (session.revoked_at) throw new Error("Driver session revoked");
 
-  if (session.revoked_at) {
-    const err = new Error("Driver session revoked");
-    err.statusCode = 401;
-    throw err;
-  }
-
-  /* =========================
-     SELFIE ENFORCEMENT
-     SOURCE OF TRUTH:
-     driver_selfies table
-  ========================= */
+  /* ---- selfie gate ---- */
   if (requireSelfie) {
-    const { rowCount } = await pool.query(
+    const { rows: selfies } = await pool.query(
       `
-      SELECT 1
+      SELECT id
       FROM driver_selfies
       WHERE driver_id = $1
         AND verified = true
+      ORDER BY created_at DESC
       LIMIT 1
       `,
       [session.driver_id]
     );
 
-    if (!rowCount) {
-      const err = new Error("Driver selfie verification required");
-      err.statusCode = 403;
-      throw err;
+    if (!selfies.length) {
+      throw new Error("Selfie required to proceed");
     }
   }
 
-  /* =========================
-     SUCCESS
-  ========================= */
   return {
-    driver_id: session.driver_id,
     token: session.token,
+    driver_id: session.driver_id,
   };
 }
 
