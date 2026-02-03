@@ -2,59 +2,65 @@
 
 const crypto = require("crypto");
 
-/* =========================
-   JSON helper
-========================= */
 function json(res, code, payload) {
   res.statusCode = code;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(payload));
 }
 
-/* =========================
-   Token helpers
-========================= */
 function getBearerToken(req) {
   const auth = String(req.headers.authorization || "");
   const m = auth.match(/^Bearer\s+(.+)$/i);
-  return m ? m[1].trim() : "";
+  return m ? m[1].trim() : null;
 }
 
 function newToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-/* =========================
-   Create driver session
-   TABLE: driver_sessions(token, driver_id, created_at, revoked_at)
-========================= */
+/**
+ * Create a driver session
+ * TABLE: driver_sessions
+ * columns:
+ * - id
+ * - driver_id
+ * - token
+ * - selfie_completed
+ * - expires_at
+ * - created_at
+ */
 async function createDriverSession(pool, driverId) {
   const token = newToken();
 
+  // expires in 24 hours (adjust if needed)
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
   await pool.query(
     `
-    INSERT INTO driver_sessions (token, driver_id)
-    VALUES ($1, $2)
+    INSERT INTO driver_sessions (
+      driver_id,
+      token,
+      selfie_completed,
+      expires_at
+    )
+    VALUES ($1, $2, false, $3)
     `,
-    [token, driverId]
+    [driverId, token, expiresAt]
   );
 
   return token;
 }
 
-/* =========================
-   Require driver
-   - Auth via driver_sessions
-   - Selfie enforced via driver_selfies
-========================= */
+/**
+ * Require valid driver session
+ */
 async function requireDriver(pool, req, { requireSelfie = true } = {}) {
   const token = getBearerToken(req);
   if (!token) throw new Error("Missing Authorization token");
 
-  /* ---- validate session ---- */
-  const { rows: sessions } = await pool.query(
+  const { rows } = await pool.query(
     `
-    SELECT token, driver_id, revoked_at
+    SELECT driver_id, selfie_completed, expires_at
     FROM driver_sessions
     WHERE token = $1
     LIMIT 1
@@ -62,33 +68,21 @@ async function requireDriver(pool, req, { requireSelfie = true } = {}) {
     [token]
   );
 
-  if (!sessions.length) throw new Error("Invalid driver token");
+  if (!rows.length) throw new Error("Invalid driver token");
 
-  const session = sessions[0];
-  if (session.revoked_at) throw new Error("Driver session revoked");
+  const session = rows[0];
 
-  /* ---- selfie gate ---- */
-  if (requireSelfie) {
-    const { rows: selfies } = await pool.query(
-      `
-      SELECT id
-      FROM driver_selfies
-      WHERE driver_id = $1
-        AND verified = true
-      ORDER BY created_at DESC
-      LIMIT 1
-      `,
-      [session.driver_id]
-    );
+  if (new Date(session.expires_at) < new Date()) {
+    throw new Error("Driver session expired");
+  }
 
-    if (!selfies.length) {
-      throw new Error("Selfie required to proceed");
-    }
+  if (requireSelfie && !session.selfie_completed) {
+    throw new Error("Selfie required");
   }
 
   return {
-    token: session.token,
     driver_id: session.driver_id,
+    selfie_completed: session.selfie_completed,
   };
 }
 
