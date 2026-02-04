@@ -7,7 +7,7 @@
  * - Shared Postgres pool
  * - Proper CORS + preflight handling
  * - Stripe webhook handled safely
- * - Platform + Admin + Driver endpoints
+ * - Platform + Orders + Admin + Driver endpoints
  */
 
 const url = require("url");
@@ -39,9 +39,14 @@ const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 /* ======================================================
    PLATFORM ROUTES
 ====================================================== */
-const {
-  handleAvailability,
-} = require("./src/controllers/availabilityController");
+const { handleAvailability } = require("./src/controllers/availabilityController");
+
+/* ======================================================
+   ORDERS (PRODUCTION)
+   NOTE: This is the live orders endpoint for the Node router.
+   (Your old Express router in src/routes/orders.js is NOT wired here.)
+====================================================== */
+const { handleOrders } = require("./src/controllers/ordersController");
 
 /* ======================================================
    RESPONSE HELPERS
@@ -97,10 +102,7 @@ function applyCors(req, res) {
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, Stripe-Signature"
   );
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,PUT,OPTIONS"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
 }
 
 /* ======================================================
@@ -121,9 +123,7 @@ function readBody(req, limit = 1_000_000) {
       chunks.push(chunk);
     });
 
-    req.on("end", () =>
-      resolve(Buffer.concat(chunks).toString("utf8"))
-    );
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -192,39 +192,28 @@ async function handleAPI(req, res, pool) {
      PLATFORM ROUTES
   ====================================================== */
   try {
-    if (
-      await handleAvailability(
-        req,
-        res,
-        pool,
-        pathname,
-        method,
-        json
-      )
-    ) {
-      return;
-    }
+    if (await handleAvailability(req, res, pool, pathname, method, json)) return;
   } catch (err) {
     console.error("[AVAILABILITY ROUTING]", err);
     return json(res, 500, { error: "Availability error" });
   }
 
   /* ======================================================
+     ORDERS (PRODUCTION ROUTE)
+     - lives at /api/orders
+  ====================================================== */
+  try {
+    if (await handleOrders(req, res, pool, pathname, method, json)) return;
+  } catch (err) {
+    console.error("[ORDERS ROUTING]", err);
+    return json(res, 500, { error: "Orders error" });
+  }
+
+  /* ======================================================
      ADMIN ROUTES
   ====================================================== */
   try {
-    if (
-      await handleAdminRoutes(
-        req,
-        res,
-        pool,
-        pathname,
-        method,
-        json
-      )
-    ) {
-      return;
-    }
+    if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
   } catch (err) {
     console.error("[ADMIN ROUTING]", err);
     return json(res, err.statusCode || 500, {
@@ -251,15 +240,10 @@ async function handleAPI(req, res, pool) {
     try {
       const body = await readJson(req);
       if (!body.pickup || !body.delivery) {
-        return json(res, 400, {
-          error: "pickup and delivery required",
-        });
+        return json(res, 400, { error: "pickup and delivery required" });
       }
 
-      const miles = await getDistanceMiles(
-        body.pickup,
-        body.delivery
-      );
+      const miles = await getDistanceMiles(body.pickup, body.delivery);
       return json(res, 200, { distance_miles: miles });
     } catch (err) {
       return json(res, 500, { error: err.message });
@@ -282,10 +266,7 @@ async function handleAPI(req, res, pool) {
         timeSensitive: body.timeSensitive ? 20 : 0,
       };
 
-      const total = Object.values(breakdown).reduce(
-        (a, b) => a + b,
-        0
-      );
+      const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
 
       return json(res, 200, {
         quote_id: crypto.randomUUID(),
