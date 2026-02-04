@@ -5,6 +5,25 @@ const router = express.Router();
 const pool = require("../utils/db");
 
 /* ======================================================
+   ORDER STATUS RULES (ADMIN ONLY)
+====================================================== */
+const ALLOWED_STATUSES = [
+  "confirmed_pending_payment",
+  "paid",
+  "assigned",
+  "completed",
+  "canceled",
+];
+
+const ALLOWED_TRANSITIONS = {
+  confirmed_pending_payment: ["paid", "canceled"],
+  paid: ["assigned", "canceled"],
+  assigned: ["completed", "canceled"],
+  completed: [],
+  canceled: [],
+};
+
+/* ======================================================
    GET /orders — list all orders
 ====================================================== */
 router.get("/", async (_req, res) => {
@@ -99,38 +118,59 @@ router.post("/", async (req, res) => {
 });
 
 /* ======================================================
-   PUT /orders/:id — update status
+   PUT /orders/:id — update status (ADMIN ONLY)
 ====================================================== */
 router.put("/:id", async (req, res) => {
-  const { status } = req.body || {};
-  if (!status) {
+  const { status: nextStatus } = req.body || {};
+
+  if (!nextStatus) {
     return res.status(400).json({ error: "status is required" });
   }
 
+  if (!ALLOWED_STATUSES.includes(nextStatus)) {
+    return res.status(400).json({ error: "Invalid status value" });
+  }
+
   try {
-    const { rows } = await pool.query(
+    // fetch current status
+    const current = await pool.query(
+      `SELECT status FROM orders WHERE id = $1`,
+      [req.params.id]
+    );
+
+    if (!current.rows.length) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const currentStatus = current.rows[0].status;
+    const allowedNext = ALLOWED_TRANSITIONS[currentStatus] || [];
+
+    if (!allowedNext.includes(nextStatus)) {
+      return res.status(400).json({
+        error: `Invalid status transition from '${currentStatus}' to '${nextStatus}'`,
+      });
+    }
+
+    // perform update
+    const updated = await pool.query(
       `
       UPDATE orders
       SET status = $1
       WHERE id = $2
       RETURNING *
       `,
-      [status, req.params.id]
+      [nextStatus, req.params.id]
     );
 
-    if (!rows.length) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    res.json(rows[0]);
+    res.json(updated.rows[0]);
   } catch (err) {
-    console.error("[ORDERS] update:", err);
+    console.error("[ORDERS] update status:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
 /* ======================================================
-   DELETE /orders/:id
+   DELETE /orders/:id — hard delete (ADMIN ONLY)
 ====================================================== */
 router.delete("/:id", async (req, res) => {
   try {
