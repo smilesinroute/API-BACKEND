@@ -7,7 +7,7 @@
  * - Shared Postgres pool
  * - Proper CORS + preflight handling
  * - Stripe webhook handled safely
- * - Admin + Driver + Public endpoints
+ * - Platform + Admin + Driver endpoints
  */
 
 const url = require("url");
@@ -37,6 +37,13 @@ const { handleDriverProof } = require("./src/drivers/driverProof");
 const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 
 /* ======================================================
+   PLATFORM ROUTES
+====================================================== */
+const {
+  handleAvailability,
+} = require("./src/controllers/availabilityController");
+
+/* ======================================================
    RESPONSE HELPERS
 ====================================================== */
 function json(res, status, payload) {
@@ -58,14 +65,24 @@ function applyCors(req, res) {
   const origin = req.headers.origin;
 
   const allowedOrigins = [
-    process.env.ADMIN_ORIGIN,
+    // environment-defined
     process.env.CUSTOMER_ORIGIN,
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://localhost:5176", // driver dev
+    process.env.ADMIN_ORIGIN,
+    process.env.DRIVER_ORIGIN,
+    process.env.OPS_ORIGIN,
+
+    // local development
+    "http://localhost:5173", // customer
+    "http://localhost:5174", // admin
+    "http://localhost:5176", // driver
+    "http://localhost:5177", // ops
+
+    // production
     "https://smilesinroute.delivery",
     "https://www.smilesinroute.delivery",
     "https://admin.smilesinroute.delivery",
+    "https://driver.smilesinroute.delivery",
+    "https://ops.smilesinroute.delivery",
   ].filter(Boolean);
 
   if (origin && allowedOrigins.includes(origin)) {
@@ -104,7 +121,9 @@ function readBody(req, limit = 1_000_000) {
       chunks.push(chunk);
     });
 
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () =>
+      resolve(Buffer.concat(chunks).toString("utf8"))
+    );
     req.on("error", reject);
   });
 }
@@ -121,35 +140,17 @@ async function readJson(req) {
 /* ======================================================
    VALIDATION HELPERS
 ====================================================== */
-const str = (v) => String(v ?? "").trim();
-
 function num(v, label) {
   const n = Number(v);
   if (!Number.isFinite(n)) throw new Error(`${label} must be a number`);
   return n;
 }
 
-function isoDate(v) {
-  const s = String(v || "");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    throw new Error("scheduled_date must be YYYY-MM-DD");
-  }
-  return s;
-}
-
-function hhmm(v) {
-  const s = String(v || "");
-  if (!/^\d{2}:\d{2}$/.test(s)) {
-    throw new Error("scheduled_time must be HH:MM");
-  }
-  return s;
-}
-
 /* ======================================================
    MAIN API ROUTER
 ====================================================== */
 async function handleAPI(req, res, pool) {
-  /* ===== CORS + PREFLIGHT (ABSOLUTELY FIRST) ===== */
+  /* ===== CORS + PREFLIGHT ===== */
   applyCors(req, res);
 
   if (req.method === "OPTIONS") {
@@ -162,7 +163,7 @@ async function handleAPI(req, res, pool) {
   const { pathname } = url.parse(rawUrl, true);
 
   /* ======================================================
-     STRIPE WEBHOOK (RAW BODY SAFE)
+     STRIPE WEBHOOK
   ====================================================== */
   if (rawUrl.startsWith("/api/webhook/stripe")) {
     try {
@@ -188,10 +189,42 @@ async function handleAPI(req, res, pool) {
   }
 
   /* ======================================================
+     PLATFORM ROUTES
+  ====================================================== */
+  try {
+    if (
+      await handleAvailability(
+        req,
+        res,
+        pool,
+        pathname,
+        method,
+        json
+      )
+    ) {
+      return;
+    }
+  } catch (err) {
+    console.error("[AVAILABILITY ROUTING]", err);
+    return json(res, 500, { error: "Availability error" });
+  }
+
+  /* ======================================================
      ADMIN ROUTES
   ====================================================== */
   try {
-    if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
+    if (
+      await handleAdminRoutes(
+        req,
+        res,
+        pool,
+        pathname,
+        method,
+        json
+      )
+    ) {
+      return;
+    }
   } catch (err) {
     console.error("[ADMIN ROUTING]", err);
     return json(res, err.statusCode || 500, {
@@ -200,7 +233,7 @@ async function handleAPI(req, res, pool) {
   }
 
   /* ======================================================
-     HEALTH CHECK
+     HEALTH
   ====================================================== */
   if (pathname === "/api/health" && method === "GET") {
     try {
@@ -218,9 +251,15 @@ async function handleAPI(req, res, pool) {
     try {
       const body = await readJson(req);
       if (!body.pickup || !body.delivery) {
-        return json(res, 400, { error: "pickup and delivery required" });
+        return json(res, 400, {
+          error: "pickup and delivery required",
+        });
       }
-      const miles = await getDistanceMiles(body.pickup, body.delivery);
+
+      const miles = await getDistanceMiles(
+        body.pickup,
+        body.delivery
+      );
       return json(res, 200, { distance_miles: miles });
     } catch (err) {
       return json(res, 500, { error: err.message });
@@ -243,7 +282,10 @@ async function handleAPI(req, res, pool) {
         timeSensitive: body.timeSensitive ? 20 : 0,
       };
 
-      const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+      const total = Object.values(breakdown).reduce(
+        (a, b) => a + b,
+        0
+      );
 
       return json(res, 200, {
         quote_id: crypto.randomUUID(),
