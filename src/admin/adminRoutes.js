@@ -12,7 +12,7 @@ const { createPaymentSession } = require("../lib/stripeCheckout");
  * - Auth via Authorization: Bearer <ADMIN_API_KEY>
  * - Orders table is the single source of truth
  * - Explicit state transitions (locked)
- * - No silent failures
+ * - Correct error propagation (401/403 preserved)
  */
 
 /* ======================================================
@@ -122,10 +122,7 @@ async function handleDashboard(pool) {
 ====================================================== */
 async function handleAdminRoutes(req, res, pool, pathname, method, json) {
   try {
-    /* ======================================================
-       DASHBOARD
-       GET /admin/dashboard
-    ====================================================== */
+    /* ================= DASHBOARD ================= */
     if (pathname === "/admin/dashboard" && method === "GET") {
       requireAdmin(req);
       const payload = await handleDashboard(pool);
@@ -133,10 +130,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return true;
     }
 
-    /* ======================================================
-       LIST ALL ORDERS
-       GET /admin/orders
-    ====================================================== */
+    /* ================= LIST ORDERS ================= */
     if (pathname === "/admin/orders" && method === "GET") {
       requireAdmin(req);
 
@@ -150,10 +144,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return true;
     }
 
-    /* ======================================================
-       APPROVE ORDER
-       POST /admin/orders/:id/approve
-    ====================================================== */
+    /* ================= APPROVE ORDER ================= */
     if (
       pathname.startsWith("/admin/orders/") &&
       pathname.endsWith("/approve") &&
@@ -229,17 +220,11 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         console.error("[EMAIL] Payment email failed", err);
       });
 
-      json(res, 200, {
-        success: true,
-        orderId: order.id,
-      });
+      json(res, 200, { success: true, orderId: order.id });
       return true;
     }
 
-    /* ======================================================
-       REJECT ORDER
-       POST /admin/orders/:id/reject
-    ====================================================== */
+    /* ================= REJECT ORDER ================= */
     if (
       pathname.startsWith("/admin/orders/") &&
       pathname.endsWith("/reject") &&
@@ -263,19 +248,20 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
         return true;
       }
 
-      json(res, 200, {
-        success: true,
-        orderId,
-      });
+      json(res, 200, { success: true, orderId });
       return true;
     }
 
     return false;
   } catch (err) {
+    // Preserve auth errors
+    if (err && err.statusCode) {
+      json(res, err.statusCode, { error: err.message });
+      return true;
+    }
+
     console.error("[ADMIN ROUTES ERROR]", err);
-    json(res, 500, {
-      error: "Internal admin server error",
-    });
+    json(res, 500, { error: "Internal admin server error" });
     return true;
   }
 }
