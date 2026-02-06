@@ -23,8 +23,6 @@ function jsonError(json, res, status, message) {
 }
 
 function parseOrderId(pathname) {
-  // /admin/orders/:id/approve
-  // /admin/orders/:id/reject
   const parts = String(pathname || "").split("/").filter(Boolean);
   if (parts.length !== 4) return null;
   if (parts[0] !== "admin" || parts[1] !== "orders") return null;
@@ -52,6 +50,7 @@ function laneForStatus(status) {
       return "awaiting_payment";
     case "paid":
     case "ready_for_dispatch":
+    case "assigned":
     case "in_progress":
       return "active";
     default:
@@ -252,9 +251,78 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return true;
     }
 
+    /* ================= ASSIGN DRIVER ================= */
+    if (
+      pathname.startsWith("/admin/orders/") &&
+      pathname.endsWith("/assign") &&
+      method === "POST"
+    ) {
+      requireAdmin(req);
+
+      const orderId = parseOrderId(pathname);
+      if (!orderId) {
+        jsonError(json, res, 400, "Invalid order path");
+        return true;
+      }
+
+      const body = await readJson(req);
+      const driverId = String(body.driver_id || "").trim();
+
+      if (!driverId) {
+        jsonError(json, res, 400, "driver_id is required");
+        return true;
+      }
+
+      const order = await loadOrder(pool, orderId);
+      if (!order) {
+        jsonError(json, res, 404, "Order not found");
+        return true;
+      }
+
+      if (!["paid", "ready_for_dispatch"].includes(order.status)) {
+        jsonError(
+          json,
+          res,
+          409,
+          `Order cannot be assigned from status '${order.status}'`
+        );
+        return true;
+      }
+
+      if (order.assigned_driver_id) {
+        jsonError(json, res, 409, "Order already assigned");
+        return true;
+      }
+
+      // Verify driver exists
+      const driverCheck = await pool.query(
+        `SELECT id FROM drivers WHERE id = $1 LIMIT 1`,
+        [driverId]
+      );
+
+      if (!driverCheck.rowCount) {
+        jsonError(json, res, 404, "Driver not found");
+        return true;
+      }
+
+      const { rows } = await pool.query(
+        `
+        UPDATE orders
+        SET
+          assigned_driver_id = $2,
+          status = 'assigned'
+        WHERE id = $1
+        RETURNING *
+        `,
+        [orderId, driverId]
+      );
+
+      json(res, 200, rows[0]);
+      return true;
+    }
+
     return false;
   } catch (err) {
-    // Preserve auth errors
     if (err && err.statusCode) {
       json(res, err.statusCode, { error: err.message });
       return true;
@@ -264,6 +332,24 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
     json(res, 500, { error: "Internal admin server error" });
     return true;
   }
+}
+
+/* ======================================================
+   BODY PARSER
+====================================================== */
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
 }
 
 module.exports = { handleAdminRoutes };
