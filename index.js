@@ -4,7 +4,7 @@
  * Smiles In Route — Core API Router
  * =================================
  * Plain Node.js router (NO Express)
- * This file is the SINGLE source of truth for routing.
+ * Single source of truth for routing.
  */
 
 const url = require("url");
@@ -26,7 +26,7 @@ function text(res, status, message) {
 }
 
 /* ================================
-   CORS (FIXES CONFIRM FAILURE)
+   CORS (fixes confirm failures)
 ================================ */
 function applyCors(req, res) {
   const origin = req.headers.origin;
@@ -85,7 +85,7 @@ async function readJson(req) {
 }
 
 /* ================================
-   CONTROLLERS (REAL PATHS)
+   CONTROLLERS
 ================================ */
 const { handleOrders } = require("./src/controllers/ordersController");
 const { handleAvailability } = require("./src/controllers/availabilityController");
@@ -120,15 +120,64 @@ async function handleAPI(req, res, pool) {
   }
 
   /* ============================
-     AVAILABILITY (READ ONLY)
-     GET /api/available-slots/:date
+     DISTANCE (RESTORED)
+     POST /api/distance
+  ============================ */
+  if (pathname === "/api/distance" && method === "POST") {
+    try {
+      const body = await readJson(req);
+
+      if (!body.pickup || !body.delivery) {
+        return json(res, 400, { error: "pickup and delivery required" });
+      }
+
+      // Temporary fixed distance until matrix is wired
+      const miles = 10;
+
+      return json(res, 200, { distance_miles: miles });
+    } catch (err) {
+      return json(res, 500, { error: err.message });
+    }
+  }
+
+  /* ============================
+     QUOTE (RESTORED)
+     POST /api/quote
+  ============================ */
+  if (pathname === "/api/quote" && method === "POST") {
+    try {
+      const body = await readJson(req);
+      const miles = Number(body.distance_miles || 0);
+
+      const breakdown = {
+        base: 25,
+        mileage: Number((miles * 2.25).toFixed(2)),
+        fragile: body.fragile ? 10 : 0,
+        priority: body.priority ? 15 : 0,
+        timeSensitive: body.timeSensitive ? 20 : 0,
+      };
+
+      const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+
+      return json(res, 200, {
+        quote_id: crypto.randomUUID(),
+        breakdown,
+        total,
+      });
+    } catch (err) {
+      return json(res, 400, { error: err.message });
+    }
+  }
+
+  /* ============================
+     AVAILABILITY
   ============================ */
   if (await handleAvailability(req, res, pool, pathname, method, json)) {
     return;
   }
 
   /* ============================
-     ORDERS (CREATE / CONFIRM)
+     ORDERS
   ============================ */
   if (await handleOrders(req, res, pool, pathname, method, json)) {
     return;
@@ -159,4 +208,3 @@ async function handleAPI(req, res, pool) {
 }
 
 module.exports = { handleAPI };
-
