@@ -2,12 +2,12 @@
 
 /**
  * Smiles in Route — Core API Router (Production)
- * =============================================
+ * ==============================================
  * - Plain Node.js HTTP routing (NO Express)
  * - Shared Postgres pool
- * - Proper CORS + preflight handling
- * - Stripe webhook handled safely
- * - Platform + Orders + Admin + Driver endpoints
+ * - Safe CORS handling
+ * - Hardened routing with isolation
+ * - Stripe webhook safe handling
  */
 
 const url = require("url");
@@ -42,9 +42,7 @@ const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 const { handleAvailability } = require("./src/controllers/availabilityController");
 
 /* ======================================================
-   ORDERS (PRODUCTION)
-   NOTE: This is the live orders endpoint for the Node router.
-   (Your old Express router in src/routes/orders.js is NOT wired here.)
+   ORDERS
 ====================================================== */
 const { handleOrders } = require("./src/controllers/ordersController");
 
@@ -52,9 +50,17 @@ const { handleOrders } = require("./src/controllers/ordersController");
    RESPONSE HELPERS
 ====================================================== */
 function json(res, status, payload) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(payload));
+  try {
+    res.statusCode = status;
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(JSON.stringify(payload));
+  } catch (err) {
+    console.error("[JSON RESPONSE ERROR]", err);
+    try {
+      res.statusCode = 500;
+      res.end('{"error":"response_failure"}');
+    } catch {}
+  }
 }
 
 function text(res, status, message) {
@@ -67,22 +73,19 @@ function text(res, status, message) {
    CORS (MUST RUN FIRST)
 ====================================================== */
 function applyCors(req, res) {
-  const origin = req.headers.origin;
+  const origin = req.headers.origin || "*";
 
   const allowedOrigins = [
-    // environment-defined
     process.env.CUSTOMER_ORIGIN,
     process.env.ADMIN_ORIGIN,
     process.env.DRIVER_ORIGIN,
     process.env.OPS_ORIGIN,
 
-    // local development
-    "http://localhost:5173", // customer
-    "http://localhost:5174", // admin
-    "http://localhost:5176", // driver
-    "http://localhost:5177", // ops
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5176",
+    "http://localhost:5177",
 
-    // production
     "https://smilesinroute.delivery",
     "https://www.smilesinroute.delivery",
     "https://admin.smilesinroute.delivery",
@@ -90,7 +93,7 @@ function applyCors(req, res) {
     "https://ops.smilesinroute.delivery",
   ].filter(Boolean);
 
-  if (origin && allowedOrigins.includes(origin)) {
+  if (allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   } else {
@@ -147,10 +150,22 @@ function num(v, label) {
 }
 
 /* ======================================================
+   SAFE ROUTE WRAPPER
+====================================================== */
+async function safeRoute(label, fn, res) {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error(`[${label}]`, err);
+    json(res, 500, { error: `${label.toLowerCase()} error` });
+    return true;
+  }
+}
+
+/* ======================================================
    MAIN API ROUTER
 ====================================================== */
 async function handleAPI(req, res, pool) {
-  /* ===== CORS + PREFLIGHT ===== */
   applyCors(req, res);
 
   if (req.method === "OPTIONS") {
@@ -166,60 +181,52 @@ async function handleAPI(req, res, pool) {
      STRIPE WEBHOOK
   ====================================================== */
   if (rawUrl.startsWith("/api/webhook/stripe")) {
-    try {
+    return safeRoute("STRIPE WEBHOOK", async () => {
       const handled = await handleStripeWebhook(req, res, pool);
-      if (handled) return;
-    } catch (err) {
-      console.error("[STRIPE WEBHOOK]", err);
-      return json(res, 500, { error: "Webhook error" });
-    }
+      if (!handled) json(res, 404, { error: "Webhook not handled" });
+      return true;
+    }, res);
   }
 
   /* ======================================================
      DRIVER ROUTES
   ====================================================== */
-  try {
-    if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
-    if (await handleDriverOrders(req, res, pool, pathname, method)) return;
-    if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
-    if (await handleDriverProof(req, res, pool, pathname, method)) return;
-  } catch (err) {
-    console.error("[DRIVER ROUTING]", err);
-    return json(res, 500, { error: "Driver routing error" });
-  }
+  if (
+    await safeRoute("DRIVER ROUTING", async () => {
+      if (await handleDriverRoutes(req, res, pool, pathname, method)) return true;
+      if (await handleDriverOrders(req, res, pool, pathname, method)) return true;
+      if (await handleDriverAssignments(req, res, pool, pathname, method)) return true;
+      if (await handleDriverProof(req, res, pool, pathname, method)) return true;
+      return false;
+    }, res)
+  ) return;
 
   /* ======================================================
      PLATFORM ROUTES
   ====================================================== */
-  try {
-    if (await handleAvailability(req, res, pool, pathname, method, json)) return;
-  } catch (err) {
-    console.error("[AVAILABILITY ROUTING]", err);
-    return json(res, 500, { error: "Availability error" });
-  }
+  if (
+    await safeRoute("AVAILABILITY ROUTING", async () => {
+      return await handleAvailability(req, res, pool, pathname, method, json);
+    }, res)
+  ) return;
 
   /* ======================================================
-     ORDERS (PRODUCTION ROUTE)
-     - lives at /api/orders
+     ORDERS
   ====================================================== */
-  try {
-    if (await handleOrders(req, res, pool, pathname, method, json)) return;
-  } catch (err) {
-    console.error("[ORDERS ROUTING]", err);
-    return json(res, 500, { error: "Orders error" });
-  }
+  if (
+    await safeRoute("ORDERS ROUTING", async () => {
+      return await handleOrders(req, res, pool, pathname, method, json);
+    }, res)
+  ) return;
 
   /* ======================================================
      ADMIN ROUTES
   ====================================================== */
-  try {
-    if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
-  } catch (err) {
-    console.error("[ADMIN ROUTING]", err);
-    return json(res, err.statusCode || 500, {
-      error: err.message || "Admin error",
-    });
-  }
+  if (
+    await safeRoute("ADMIN ROUTING", async () => {
+      return await handleAdminRoutes(req, res, pool, pathname, method, json);
+    }, res)
+  ) return;
 
   /* ======================================================
      HEALTH
