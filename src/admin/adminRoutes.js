@@ -16,22 +16,44 @@ const { createPaymentSession } = require("../lib/stripeCheckout");
  */
 
 /* ======================================================
-   HELPERS
+   RESPONSE HELPERS
 ====================================================== */
-function jsonError(json, res, status, message) {
-  json(res, status, { error: message });
+function jsonError(json, res, status, message, extra) {
+  const payload = { error: message };
+  if (extra && typeof extra === "object") Object.assign(payload, extra);
+  return json(res, status, payload);
 }
 
-function parseOrderId(pathname) {
-  const parts = String(pathname || "").split("/").filter(Boolean);
-  if (parts.length !== 4) return null;
-  if (parts[0] !== "admin" || parts[1] !== "orders") return null;
-  return parts[2];
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
 }
 
 function toNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Expected:
+ * - /admin/orders/:id/approve
+ * - /admin/orders/:id/reject
+ * - /admin/orders/:id/assign
+ *
+ * Returns { orderId, action } or null
+ */
+function parseOrderActionPath(pathname) {
+  const parts = String(pathname || "").split("/").filter(Boolean);
+  // ["admin","orders",":id",":action"]
+  if (parts.length !== 4) return null;
+  if (parts[0] !== "admin" || parts[1] !== "orders") return null;
+
+  const orderId = parts[2];
+  const action = parts[3];
+
+  if (!isNonEmptyString(orderId)) return null;
+  if (!["approve", "reject", "assign"].includes(action)) return null;
+
+  return { orderId, action };
 }
 
 async function loadOrder(pool, orderId) {
@@ -61,7 +83,7 @@ function laneForStatus(status) {
 /* ======================================================
    DASHBOARD AGGREGATION
 ====================================================== */
-async function handleDashboard(pool) {
+async function buildDashboardPayload(pool) {
   const { rows: orders } = await pool.query(`
     SELECT
       id,
@@ -105,8 +127,8 @@ async function handleDashboard(pool) {
       awaitingApproval: lanes.action_required.length,
       awaitingPayment: lanes.awaiting_payment.length,
       activeOrders: lanes.active.length,
-      totalDrivers: driversRes.rows[0].count,
-      revenueToday: Number(revenueRes.rows[0].total),
+      totalDrivers: driversRes.rows[0]?.count ?? 0,
+      revenueToday: Number(revenueRes.rows[0]?.total ?? 0),
     },
     lanes,
     meta: {
@@ -114,224 +136,6 @@ async function handleDashboard(pool) {
       checkedAt: new Date().toISOString(),
     },
   };
-}
-
-/* ======================================================
-   MAIN ADMIN ROUTER
-====================================================== */
-async function handleAdminRoutes(req, res, pool, pathname, method, json) {
-  try {
-    /* ================= DASHBOARD ================= */
-    if (pathname === "/admin/dashboard" && method === "GET") {
-      requireAdmin(req);
-      const payload = await handleDashboard(pool);
-      json(res, 200, payload);
-      return true;
-    }
-
-    /* ================= LIST ORDERS ================= */
-    if (pathname === "/admin/orders" && method === "GET") {
-      requireAdmin(req);
-
-      const { rows } = await pool.query(`
-        SELECT *
-        FROM orders
-        ORDER BY created_at DESC
-      `);
-
-      json(res, 200, { orders: rows });
-      return true;
-    }
-
-    /* ================= APPROVE ORDER ================= */
-    if (
-      pathname.startsWith("/admin/orders/") &&
-      pathname.endsWith("/approve") &&
-      method === "POST"
-    ) {
-      requireAdmin(req);
-
-      const orderId = parseOrderId(pathname);
-      if (!orderId) {
-        jsonError(json, res, 400, "Invalid order path");
-        return true;
-      }
-
-      const order = await loadOrder(pool, orderId);
-      if (!order) {
-        jsonError(json, res, 404, "Order not found");
-        return true;
-      }
-
-      if (order.status !== "confirmed_pending_payment") {
-        jsonError(
-          json,
-          res,
-          409,
-          `Order cannot be approved from status '${order.status}'`
-        );
-        return true;
-      }
-
-      const email = String(order.customer_email || "").trim();
-      const total = toNumber(order.total_amount);
-
-      if (!email) {
-        jsonError(json, res, 400, "Customer email missing");
-        return true;
-      }
-
-      if (!total || total <= 0) {
-        jsonError(json, res, 400, "Invalid order total");
-        return true;
-      }
-
-      let session;
-      try {
-        session = await createPaymentSession({
-          ...order,
-          customer_email: email,
-          total_amount: total,
-        });
-      } catch (err) {
-        console.error("[STRIPE] createPaymentSession failed", err);
-        jsonError(json, res, 502, "Stripe session creation failed");
-        return true;
-      }
-
-      await pool.query(
-        `
-        UPDATE orders
-        SET
-          status = 'approved_pending_payment',
-          stripe_session_id = $2,
-          stripe_checkout_url = $3
-        WHERE id = $1
-        `,
-        [order.id, session.id, session.url]
-      );
-
-      sendCustomerPaymentLink({
-        to: email,
-        paymentLink: session.url,
-        order,
-      }).catch((err) => {
-        console.error("[EMAIL] Payment email failed", err);
-      });
-
-      json(res, 200, { success: true, orderId: order.id });
-      return true;
-    }
-
-    /* ================= REJECT ORDER ================= */
-    if (
-      pathname.startsWith("/admin/orders/") &&
-      pathname.endsWith("/reject") &&
-      method === "POST"
-    ) {
-      requireAdmin(req);
-
-      const orderId = parseOrderId(pathname);
-      if (!orderId) {
-        jsonError(json, res, 400, "Invalid order path");
-        return true;
-      }
-
-      const { rowCount } = await pool.query(
-        `UPDATE orders SET status = 'rejected' WHERE id = $1`,
-        [orderId]
-      );
-
-      if (!rowCount) {
-        jsonError(json, res, 404, "Order not found");
-        return true;
-      }
-
-      json(res, 200, { success: true, orderId });
-      return true;
-    }
-
-    /* ================= ASSIGN DRIVER ================= */
-    if (
-      pathname.startsWith("/admin/orders/") &&
-      pathname.endsWith("/assign") &&
-      method === "POST"
-    ) {
-      requireAdmin(req);
-
-      const orderId = parseOrderId(pathname);
-      if (!orderId) {
-        jsonError(json, res, 400, "Invalid order path");
-        return true;
-      }
-
-      const body = await readJson(req);
-      const driverId = String(body.driver_id || "").trim();
-
-      if (!driverId) {
-        jsonError(json, res, 400, "driver_id is required");
-        return true;
-      }
-
-      const order = await loadOrder(pool, orderId);
-      if (!order) {
-        jsonError(json, res, 404, "Order not found");
-        return true;
-      }
-
-      if (!["paid", "ready_for_dispatch"].includes(order.status)) {
-        jsonError(
-          json,
-          res,
-          409,
-          `Order cannot be assigned from status '${order.status}'`
-        );
-        return true;
-      }
-
-      if (order.assigned_driver_id) {
-        jsonError(json, res, 409, "Order already assigned");
-        return true;
-      }
-
-      // Verify driver exists
-      const driverCheck = await pool.query(
-        `SELECT id FROM drivers WHERE id = $1 LIMIT 1`,
-        [driverId]
-      );
-
-      if (!driverCheck.rowCount) {
-        jsonError(json, res, 404, "Driver not found");
-        return true;
-      }
-
-      const { rows } = await pool.query(
-        `
-        UPDATE orders
-        SET
-          assigned_driver_id = $2,
-          status = 'assigned'
-        WHERE id = $1
-        RETURNING *
-        `,
-        [orderId, driverId]
-      );
-
-      json(res, 200, rows[0]);
-      return true;
-    }
-
-    return false;
-  } catch (err) {
-    if (err && err.statusCode) {
-      json(res, err.statusCode, { error: err.message });
-      return true;
-    }
-
-    console.error("[ADMIN ROUTES ERROR]", err);
-    json(res, 500, { error: "Internal admin server error" });
-    return true;
-  }
 }
 
 /* ======================================================
@@ -350,6 +154,183 @@ function readJson(req) {
     });
     req.on("error", reject);
   });
+}
+
+/* ======================================================
+   ROUTE HANDLERS
+====================================================== */
+async function approveOrder(pool, json, res, orderId) {
+  const order = await loadOrder(pool, orderId);
+  if (!order) return jsonError(json, res, 404, "Order not found");
+
+  if (order.status !== "confirmed_pending_payment") {
+    return jsonError(
+      json,
+      res,
+      409,
+      `Order cannot be approved from status '${order.status}'`
+    );
+  }
+
+  const email = String(order.customer_email || "").trim();
+  const total = toNumber(order.total_amount);
+
+  if (!email) return jsonError(json, res, 400, "Customer email missing");
+  if (!total || total <= 0) return jsonError(json, res, 400, "Invalid order total");
+
+  let session;
+  try {
+    session = await createPaymentSession({
+      ...order,
+      customer_email: email,
+      total_amount: total,
+    });
+  } catch (err) {
+    console.error("[STRIPE] createPaymentSession failed", err);
+    return jsonError(json, res, 502, "Stripe session creation failed");
+  }
+
+  await pool.query(
+    `
+    UPDATE orders
+    SET
+      status = 'approved_pending_payment',
+      stripe_session_id = $2,
+      stripe_checkout_url = $3
+    WHERE id = $1
+    `,
+    [order.id, session.id, session.url]
+  );
+
+  // Fire-and-forget email: don't block the request
+  sendCustomerPaymentLink({
+    to: email,
+    paymentLink: session.url,
+    order,
+  }).catch((err) => console.error("[EMAIL] Payment email failed", err));
+
+  return json(res, 200, { success: true, orderId: order.id });
+}
+
+async function rejectOrder(pool, json, res, orderId) {
+  const { rowCount } = await pool.query(
+    `UPDATE orders SET status = 'rejected' WHERE id = $1`,
+    [orderId]
+  );
+
+  if (!rowCount) return jsonError(json, res, 404, "Order not found");
+  return json(res, 200, { success: true, orderId });
+}
+
+async function assignDriver(pool, json, res, req, orderId) {
+  const body = await readJson(req);
+  const driverId = String(body.driver_id || "").trim();
+
+  if (!driverId) return jsonError(json, res, 400, "driver_id is required");
+
+  const order = await loadOrder(pool, orderId);
+  if (!order) return jsonError(json, res, 404, "Order not found");
+
+  if (!["paid", "ready_for_dispatch"].includes(order.status)) {
+    return jsonError(
+      json,
+      res,
+      409,
+      `Order cannot be assigned from status '${order.status}'`
+    );
+  }
+
+  if (order.assigned_driver_id) {
+    return jsonError(json, res, 409, "Order already assigned");
+  }
+
+  const driverCheck = await pool.query(
+    `SELECT id FROM drivers WHERE id = $1 LIMIT 1`,
+    [driverId]
+  );
+  if (!driverCheck.rowCount) return jsonError(json, res, 404, "Driver not found");
+
+  const { rows } = await pool.query(
+    `
+    UPDATE orders
+    SET
+      assigned_driver_id = $2,
+      status = 'assigned'
+    WHERE id = $1
+    RETURNING *
+    `,
+    [orderId, driverId]
+  );
+
+  return json(res, 200, rows[0]);
+}
+
+/* ======================================================
+   MAIN ADMIN ROUTER
+====================================================== */
+async function handleAdminRoutes(req, res, pool, pathname, method, json) {
+  try {
+    // Only handle /admin/*
+    if (!String(pathname || "").startsWith("/admin")) return false;
+
+    /* ================= DASHBOARD ================= */
+    if (pathname === "/admin/dashboard" && method === "GET") {
+      requireAdmin(req);
+      const payload = await buildDashboardPayload(pool);
+      json(res, 200, payload);
+      return true;
+    }
+
+    /* ================= LIST ORDERS ================= */
+    if (pathname === "/admin/orders" && method === "GET") {
+      requireAdmin(req);
+
+      const { rows } = await pool.query(`
+        SELECT *
+        FROM orders
+        ORDER BY created_at DESC
+      `);
+
+      json(res, 200, { orders: rows });
+      return true;
+    }
+
+    /* ================= ORDER ACTIONS ================= */
+    const actionMatch = parseOrderActionPath(pathname);
+
+    if (actionMatch && method === "POST") {
+      requireAdmin(req);
+
+      const { orderId, action } = actionMatch;
+
+      if (action === "approve") {
+        await approveOrder(pool, json, res, orderId);
+        return true;
+      }
+
+      if (action === "reject") {
+        await rejectOrder(pool, json, res, orderId);
+        return true;
+      }
+
+      if (action === "assign") {
+        await assignDriver(pool, json, res, req, orderId);
+        return true;
+      }
+    }
+
+    return false;
+  } catch (err) {
+    // Preserve auth errors (requireAdmin throws with statusCode)
+    if (err && err.statusCode) {
+      json(res, err.statusCode, { error: err.message });
+      return true;
+    }
+
+    console.error("[ADMIN ROUTES ERROR]", err);
+    json(res, 500, { error: "Internal admin server error" });
+    return true;
+  }
 }
 
 module.exports = { handleAdminRoutes };
