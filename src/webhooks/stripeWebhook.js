@@ -6,27 +6,26 @@ const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 /**
- * Stripe webhook handler
- * ======================
- * - Manual router compatible (non-Express)
+ * Stripe Webhook Handler
+ * ======================================================
+ * - Plain Node.js (no Express)
  * - Uses RAW request body (required by Stripe)
- * - Trims webhook secret to handle Render newline injection
- * - Marks order as paid on checkout.session.completed
+ * - Verifies webhook signature
+ * - Moves order to ready_for_dispatch on payment
  *
  * Returns:
  *   true  → request handled
  *   false → not a Stripe webhook route
  */
 async function handleStripeWebhook(req, res, pool) {
-  // Only accept POST requests
+  // Only accept POST
   if (req.method !== "POST") return false;
 
-  // Path MUST match Stripe dashboard exactly
+  // Route must match Stripe dashboard exactly
   if (!req.url.startsWith("/api/webhook/stripe")) {
     return false;
   }
 
-  // Stripe signature header
   const signature = req.headers["stripe-signature"];
   if (!signature) {
     res.statusCode = 400;
@@ -34,19 +33,23 @@ async function handleStripeWebhook(req, res, pool) {
     return true;
   }
 
-  // Read RAW body (no parsing, no mutation)
+  /* ======================================================
+     READ RAW BODY
+  ====================================================== */
   let rawBody = "";
   for await (const chunk of req) {
     rawBody += chunk;
   }
 
-  // Verify webhook signature
+  /* ======================================================
+     VERIFY SIGNATURE
+  ====================================================== */
   let event;
   try {
     event = stripe.webhooks.constructEvent(
       rawBody,
       signature,
-      process.env.STRIPE_WEBHOOK_SECRET.trim() // 🔑 CRITICAL FIX
+      process.env.STRIPE_WEBHOOK_SECRET.trim()
     );
   } catch (err) {
     console.error("[STRIPE] Signature verification failed:", err.message);
@@ -57,30 +60,47 @@ async function handleStripeWebhook(req, res, pool) {
 
   console.log("[STRIPE] Webhook received:", event.type);
 
-  // Handle successful checkout
+  /* ======================================================
+     HANDLE EVENTS
+  ====================================================== */
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
     const orderId = session.metadata?.order_id;
 
     if (!orderId) {
-      console.warn("[STRIPE] checkout.session.completed missing order_id metadata");
-    } else {
-      await pool.query(
-        `
-        UPDATE orders
-        SET
-          payment_status = 'paid',
-          paid_at = NOW()
-        WHERE id = $1
-        `,
-        [orderId]
+      console.warn(
+        "[STRIPE] checkout.session.completed missing order_id metadata"
       );
+    } else {
+      try {
+        await pool.query(
+          `
+          UPDATE orders
+          SET
+            payment_status = 'paid',
+            status = 'ready_for_dispatch',
+            paid_at = NOW()
+          WHERE id = $1
+          `,
+          [orderId]
+        );
 
-      console.log("[STRIPE] Order marked as paid:", orderId);
+        console.log(
+          "[STRIPE] Order marked as paid and ready for dispatch:",
+          orderId
+        );
+      } catch (err) {
+        console.error(
+          "[STRIPE] Failed to update order after payment:",
+          err
+        );
+      }
     }
   }
 
-  // Always acknowledge Stripe
+  /* ======================================================
+     ACKNOWLEDGE STRIPE
+  ====================================================== */
   res.statusCode = 200;
   res.end("ok");
   return true;
