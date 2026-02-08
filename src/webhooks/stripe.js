@@ -4,15 +4,30 @@ const Stripe = require("stripe");
 const { assignDriver } = require("../drivers/driverAssignments");
 
 /**
- * Stripe webhook handler
- *
+ * ======================================================
+ * STRIPE WEBHOOK HANDLER (Production Safe)
+ * ======================================================
  * Responsibilities:
- * - Verify Stripe signature
+ * - Verify Stripe webhook signature
  * - Mark order as paid (idempotent)
- * - Automatically assign driver (reusing existing logic)
+ * - Auto-assign driver if none assigned
+ * - Never crash on retries
  */
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+/* ======================================================
+   MAIN HANDLER
+====================================================== */
 async function handleStripeWebhook(req, res, pool) {
-  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  if (req.method !== "POST") {
+    return false;
+  }
+
+  if (!req.url.startsWith("/api/webhook/stripe")) {
+    return false;
+  }
+
   const signature = req.headers["stripe-signature"];
 
   if (!signature) {
@@ -42,16 +57,22 @@ async function handleStripeWebhook(req, res, pool) {
   =============================== */
   let event;
   try {
-    event = stripe.webhooks.constructEvent(
-      rawBody,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    const secret = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
+
+    if (!secret) {
+      console.error("[STRIPE] Missing webhook secret");
+      res.statusCode = 500;
+      return res.end("Webhook secret not configured");
+    }
+
+    event = stripe.webhooks.constructEvent(rawBody, signature, secret);
   } catch (err) {
     console.error("[STRIPE] Signature verification failed:", err.message);
     res.statusCode = 400;
     return res.end(`Webhook Error: ${err.message}`);
   }
+
+  console.log("[STRIPE] Event received:", event.type);
 
   /* ===============================
      HANDLE EVENTS
@@ -67,7 +88,7 @@ async function handleStripeWebhook(req, res, pool) {
         return res.end("Missing order_id metadata");
       }
 
-      /* ---------- Mark paid (idempotent) ---------- */
+      /* ---------- Mark order as paid (idempotent) ---------- */
       const paidResult = await pool.query(
         `
         UPDATE orders
@@ -84,7 +105,7 @@ async function handleStripeWebhook(req, res, pool) {
 
       if (paidResult.rowCount === 0) {
         console.log(
-          `[STRIPE] Order ${orderId} already paid — skipping payment transition`
+          `[STRIPE] Order ${orderId} already marked paid — skipping`
         );
       } else {
         console.log(`✅ Order ${orderId} marked as PAID`);
@@ -106,7 +127,7 @@ async function handleStripeWebhook(req, res, pool) {
 
       if (rows[0].assigned_driver_id) {
         console.log(
-          `[DISPATCH] Order ${orderId} already has driver — skipping assignment`
+          `[DISPATCH] Order ${orderId} already has driver — skipping`
         );
       } else {
         /* ---------- Select available driver ---------- */
@@ -130,12 +151,12 @@ async function handleStripeWebhook(req, res, pool) {
           await assignDriver(pool, orderId, driverId);
 
           console.log(
-            `🚚 Driver ${driverId} automatically assigned to order ${orderId}`
+            `🚚 Driver ${driverId} assigned to order ${orderId}`
           );
         }
       }
     } else {
-      console.log(`[STRIPE] Ignored event type: ${event.type}`);
+      console.log(`[STRIPE] Ignored event: ${event.type}`);
     }
   } catch (err) {
     console.error("[STRIPE] Webhook processing error:", err);
@@ -148,6 +169,7 @@ async function handleStripeWebhook(req, res, pool) {
   =============================== */
   res.statusCode = 200;
   res.end("ok");
+  return true;
 }
 
 module.exports = { handleStripeWebhook };
