@@ -1,51 +1,58 @@
+
 "use strict";
 
 const Stripe = require("stripe");
 
-// Initialize Stripe once
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 /**
- * Create Stripe Checkout Session
- * ==============================
- * - One-time card payment
- * - Order ID stored in metadata for webhook reconciliation
+ * Create Stripe Checkout session
+ * --------------------------------
+ * - Used by admin approve flow
+ * - Stores order_id in metadata
+ * - Redirects to PUBLIC customer site (not admin)
  */
 async function createPaymentSession(order) {
-  if (!process.env.FRONTEND_URL) {
-    throw new Error("FRONTEND_URL is not set");
+  if (!order || !order.id) {
+    throw new Error("Invalid order provided to Stripe checkout");
   }
 
-  if (!order || !order.id || typeof order.total_amount !== "number") {
-    throw new Error("Invalid order data");
+  const amount = Math.round(Number(order.total_amount) * 100);
+
+  if (!amount || amount <= 0) {
+    throw new Error("Invalid order amount");
   }
 
-  return stripe.checkout.sessions.create({
+  const session = await stripe.checkout.sessions.create({
     mode: "payment",
-
     payment_method_types: ["card"],
+
+    customer_email: order.customer_email || undefined,
 
     line_items: [
       {
         price_data: {
           currency: "usd",
           product_data: {
-            name: `Order ${order.id}`,
+            name: `Courier Service – Order ${order.id.slice(0, 8)}`,
           },
-          // Stripe expects cents as an integer
-          unit_amount: Math.round(order.total_amount * 100),
+          unit_amount: amount,
         },
         quantity: 1,
       },
     ],
 
-    success_url: `${process.env.FRONTEND_URL}/payment-success`,
-    cancel_url: `${process.env.FRONTEND_URL}/payment-cancelled`,
-
     metadata: {
-      order_id: String(order.id),
+      order_id: order.id,
     },
+
+    success_url:
+      "https://smilesinroute.delivery/payment-success",
+    cancel_url:
+      "https://smilesinroute.delivery/payment-cancelled",
   });
+
+  return session;
 }
 
 module.exports = {
