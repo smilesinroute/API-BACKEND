@@ -1,17 +1,16 @@
 "use strict";
 
 const Stripe = require("stripe");
-const { assignDriver } = require("../drivers/driverAssignments");
 
 /**
  * ======================================================
- * STRIPE WEBHOOK HANDLER (Production Safe)
+ * STRIPE WEBHOOK HANDLER (Payment Only)
  * ======================================================
  * Responsibilities:
  * - Verify Stripe webhook signature
  * - Mark order as paid (idempotent)
- * - Auto-assign driver if none assigned
  * - Never crash on retries
+ * - No driver assignment (handled in driver system)
  */
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -20,16 +19,10 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
    MAIN HANDLER
 ====================================================== */
 async function handleStripeWebhook(req, res, pool) {
-  if (req.method !== "POST") {
-    return false;
-  }
-
-  if (!req.url.startsWith("/api/webhook/stripe")) {
-    return false;
-  }
+  if (req.method !== "POST") return false;
+  if (!req.url.startsWith("/api/webhook/stripe")) return false;
 
   const signature = req.headers["stripe-signature"];
-
   if (!signature) {
     res.statusCode = 400;
     return res.end("Missing Stripe signature");
@@ -89,7 +82,7 @@ async function handleStripeWebhook(req, res, pool) {
       }
 
       /* ---------- Mark order as paid (idempotent) ---------- */
-      const paidResult = await pool.query(
+      const result = await pool.query(
         `
         UPDATE orders
         SET
@@ -98,62 +91,15 @@ async function handleStripeWebhook(req, res, pool) {
           status = 'paid'
         WHERE id = $1
           AND payment_status IS DISTINCT FROM 'paid'
-        RETURNING id, assigned_driver_id
+        RETURNING id
         `,
         [orderId]
       );
 
-      if (paidResult.rowCount === 0) {
-        console.log(
-          `[STRIPE] Order ${orderId} already marked paid — skipping`
-        );
+      if (result.rowCount === 0) {
+        console.log(`[STRIPE] Order ${orderId} already marked paid`);
       } else {
         console.log(`✅ Order ${orderId} marked as PAID`);
-      }
-
-      /* ---------- Check assignment ---------- */
-      const { rows } = await pool.query(
-        `
-        SELECT assigned_driver_id
-        FROM orders
-        WHERE id = $1
-        `,
-        [orderId]
-      );
-
-      if (!rows.length) {
-        throw new Error("Order not found after payment");
-      }
-
-      if (rows[0].assigned_driver_id) {
-        console.log(
-          `[DISPATCH] Order ${orderId} already has driver — skipping`
-        );
-      } else {
-        /* ---------- Select available driver ---------- */
-        const driverResult = await pool.query(
-          `
-          SELECT id
-          FROM drivers
-          WHERE active = true
-          ORDER BY last_assigned_at NULLS FIRST, created_at ASC
-          LIMIT 1
-          `
-        );
-
-        if (!driverResult.rows.length) {
-          console.warn(
-            `[DISPATCH] No available drivers for order ${orderId}`
-          );
-        } else {
-          const driverId = driverResult.rows[0].id;
-
-          await assignDriver(pool, orderId, driverId);
-
-          console.log(
-            `🚚 Driver ${driverId} assigned to order ${orderId}`
-          );
-        }
       }
     } else {
       console.log(`[STRIPE] Ignored event: ${event.type}`);
