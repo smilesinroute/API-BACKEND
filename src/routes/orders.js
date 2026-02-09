@@ -7,6 +7,7 @@ const pool = require("../utils/db");
 /* ======================================================
    ORDER STATUS RULES (ADMIN ONLY)
 ====================================================== */
+
 const ALLOWED_STATUSES = [
   "confirmed_pending_payment",
   "paid",
@@ -78,7 +79,15 @@ router.post("/", async (req, res) => {
   } = req.body || {};
 
   if (!customer_email) {
-    return res.status(400).json({ error: "customer_email is required" });
+    return res.status(400).json({
+      error: "customer_email is required",
+    });
+  }
+
+  if (!pickup_address || !delivery_address) {
+    return res.status(400).json({
+      error: "pickup_address and delivery_address are required",
+    });
   }
 
   try {
@@ -93,9 +102,10 @@ router.post("/", async (req, res) => {
         scheduled_time,
         distance_miles,
         total_amount,
-        status
+        status,
+        payment_status
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'confirmed_pending_payment')
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'confirmed_pending_payment','unpaid')
       RETURNING *
       `,
       [
@@ -110,6 +120,7 @@ router.post("/", async (req, res) => {
       ]
     );
 
+    console.log("[ORDERS] created:", rows[0].id);
     res.status(201).json(rows[0]);
   } catch (err) {
     console.error("[ORDERS] create:", err);
@@ -132,7 +143,6 @@ router.put("/:id", async (req, res) => {
   }
 
   try {
-    // fetch current status
     const current = await pool.query(
       `SELECT status FROM orders WHERE id = $1`,
       [req.params.id]
@@ -151,7 +161,6 @@ router.put("/:id", async (req, res) => {
       });
     }
 
-    // perform update
     const updated = await pool.query(
       `
       UPDATE orders
@@ -191,3 +200,4 @@ router.delete("/:id", async (req, res) => {
 });
 
 module.exports = router;
+
