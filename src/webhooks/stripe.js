@@ -9,8 +9,8 @@ const Stripe = require("stripe");
  * Responsibilities:
  * - Verify Stripe webhook signature
  * - Mark order as paid (idempotent)
+ * - Move order to ready_for_dispatch
  * - Never crash on retries
- * - No driver assignment (handled in driver system)
  */
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -19,10 +19,12 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
    MAIN HANDLER
 ====================================================== */
 async function handleStripeWebhook(req, res, pool) {
+  // Only handle Stripe webhook route
   if (req.method !== "POST") return false;
   if (!req.url.startsWith("/api/webhook/stripe")) return false;
 
   const signature = req.headers["stripe-signature"];
+
   if (!signature) {
     res.statusCode = 400;
     return res.end("Missing Stripe signature");
@@ -88,7 +90,7 @@ async function handleStripeWebhook(req, res, pool) {
         SET
           payment_status = 'paid',
           paid_at = NOW(),
-          status = 'paid'
+          status = 'ready_for_dispatch'
         WHERE id = $1
           AND payment_status IS DISTINCT FROM 'paid'
         RETURNING id
@@ -99,7 +101,7 @@ async function handleStripeWebhook(req, res, pool) {
       if (result.rowCount === 0) {
         console.log(`[STRIPE] Order ${orderId} already marked paid`);
       } else {
-        console.log(`✅ Order ${orderId} marked as PAID`);
+        console.log(`✅ Order ${orderId} marked as PAID and ready for dispatch`);
       }
     } else {
       console.log(`[STRIPE] Ignored event: ${event.type}`);
