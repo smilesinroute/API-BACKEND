@@ -25,7 +25,7 @@ const ALLOWED_TRANSITIONS = {
 };
 
 /* ======================================================
-   GET /orders — list all orders (ADMIN)
+   GET /orders — list all orders
 ====================================================== */
 router.get("/", async (_req, res) => {
   try {
@@ -43,7 +43,7 @@ router.get("/", async (_req, res) => {
 });
 
 /* ======================================================
-   GET /orders/:id — single order (ADMIN)
+   GET /orders/:id — single order
 ====================================================== */
 router.get("/:id", async (req, res) => {
   try {
@@ -199,26 +199,5 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
-/* ======================================================
-   GET /driver/orders — orders available to drivers
-====================================================== */
-router.get("/driver/orders", async (_req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT *
-      FROM orders
-      WHERE status = 'paid'
-      ORDER BY created_at ASC
-    `);
-
-    res.json({
-      ok: true,
-      orders: rows,
-    });
-  } catch (err) {
-    console.error("[DRIVER ORDERS] fetch:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
 module.exports = router;
+
