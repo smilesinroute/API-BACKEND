@@ -7,17 +7,26 @@ function asId(v) {
 }
 
 /**
- * Driver Orders – Step 2A
- * - GET  /api/driver/orders
- * - POST /api/driver/order/:id/start
+ * DRIVER ORDER LIFECYCLE
+ * ------------------------------------------------
+ * GET  /api/driver/orders
+ * POST /api/driver/order/:id/accept
+ * POST /api/driver/order/:id/pickup-photo
+ * POST /api/driver/order/:id/start
+ * POST /api/driver/order/:id/delivery-photo
+ * POST /api/driver/order/:id/complete
+ * POST /api/driver/location
  */
+
 async function handleDriverOrders(req, res, pool, pathname, method) {
-  /* =========================
+  /* =====================================================
      GET /api/driver/orders
-  ========================= */
+  ===================================================== */
   if (pathname === "/api/driver/orders" && method === "GET") {
     try {
-      const session = await requireDriver(pool, req, { requireSelfie: true });
+      const session = await requireDriver(pool, req, {
+        requireSelfie: true,
+      });
 
       const { rows } = await pool.query(
         `
@@ -30,8 +39,13 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           scheduled_date,
           scheduled_time
         FROM orders
-        WHERE assigned_driver_id = $1
-          AND status IN ('ready_for_dispatch', 'en_route')
+        WHERE
+          assigned_driver_id = $1
+          AND status IN ('assigned', 'en_route')
+          OR (
+            assigned_driver_id IS NULL
+            AND status = 'ready_for_dispatch'
+          )
         ORDER BY created_at ASC
         `,
         [session.driver_id]
@@ -44,24 +58,29 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
     }
   }
 
-  /* =========================
-     POST /api/driver/order/:id/start
-  ========================= */
-  if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/start") && method === "POST") {
+  /* =====================================================
+     ACCEPT ORDER
+  ===================================================== */
+  if (
+    pathname.startsWith("/api/driver/order/") &&
+    pathname.endsWith("/accept") &&
+    method === "POST"
+  ) {
     try {
-      const session = await requireDriver(pool, req, { requireSelfie: true });
+      const session = await requireDriver(pool, req, {
+        requireSelfie: true,
+      });
 
       const orderId = asId(pathname.split("/")[4]);
-      if (!orderId) return json(res, 400, { error: "order_id missing" });
 
       const { rowCount } = await pool.query(
         `
         UPDATE orders
         SET
-          status = 'en_route',
-          pickup_at = NOW()
+          status = 'assigned',
+          assigned_driver_id = $2,
+          assigned_at = NOW()
         WHERE id = $1
-          AND assigned_driver_id = $2
           AND status = 'ready_for_dispatch'
         `,
         [orderId, session.driver_id]
@@ -69,17 +88,200 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
 
       if (!rowCount) {
         return json(res, 400, {
-          error: "Order not found, not assigned, or invalid state",
+          error: "Order not available",
         });
       }
 
       return json(res, 200, {
         ok: true,
-        order_id: orderId,
+        status: "assigned",
+      });
+    } catch (e) {
+      return json(res, 400, { error: e.message });
+    }
+  }
+
+  /* =====================================================
+     PICKUP PHOTO
+  ===================================================== */
+  if (
+    pathname.startsWith("/api/driver/order/") &&
+    pathname.endsWith("/pickup-photo") &&
+    method === "POST"
+  ) {
+    try {
+      const session = await requireDriver(pool, req, {
+        requireSelfie: true,
+      });
+
+      const orderId = asId(pathname.split("/")[4]);
+
+      await pool.query(
+        `
+        UPDATE orders
+        SET pickup_photo_taken = true,
+            pickup_photo_at = NOW()
+        WHERE id = $1
+          AND assigned_driver_id = $2
+        `,
+        [orderId, session.driver_id]
+      );
+
+      return json(res, 200, { ok: true });
+    } catch (e) {
+      return json(res, 400, { error: e.message });
+    }
+  }
+
+  /* =====================================================
+     START ROUTE
+     (requires pickup photo)
+  ===================================================== */
+  if (
+    pathname.startsWith("/api/driver/order/") &&
+    pathname.endsWith("/start") &&
+    method === "POST"
+  ) {
+    try {
+      const session = await requireDriver(pool, req, {
+        requireSelfie: true,
+      });
+
+      const orderId = asId(pathname.split("/")[4]);
+
+      const { rowCount } = await pool.query(
+        `
+        UPDATE orders
+        SET status = 'en_route',
+            pickup_at = NOW()
+        WHERE id = $1
+          AND assigned_driver_id = $2
+          AND status = 'assigned'
+          AND pickup_photo_taken = true
+        `,
+        [orderId, session.driver_id]
+      );
+
+      if (!rowCount) {
+        return json(res, 400, {
+          error: "Pickup photo required",
+        });
+      }
+
+      return json(res, 200, {
+        ok: true,
         status: "en_route",
       });
     } catch (e) {
-      console.error("[DRIVER ORDERS] start error:", e.message);
+      return json(res, 400, { error: e.message });
+    }
+  }
+
+  /* =====================================================
+     DELIVERY PHOTO
+  ===================================================== */
+  if (
+    pathname.startsWith("/api/driver/order/") &&
+    pathname.endsWith("/delivery-photo") &&
+    method === "POST"
+  ) {
+    try {
+      const session = await requireDriver(pool, req, {
+        requireSelfie: true,
+      });
+
+      const orderId = asId(pathname.split("/")[4]);
+
+      await pool.query(
+        `
+        UPDATE orders
+        SET delivery_photo_taken = true,
+            delivery_photo_at = NOW()
+        WHERE id = $1
+          AND assigned_driver_id = $2
+        `,
+        [orderId, session.driver_id]
+      );
+
+      return json(res, 200, { ok: true });
+    } catch (e) {
+      return json(res, 400, { error: e.message });
+    }
+  }
+
+  /* =====================================================
+     COMPLETE ORDER
+     (requires delivery photo)
+  ===================================================== */
+  if (
+    pathname.startsWith("/api/driver/order/") &&
+    pathname.endsWith("/complete") &&
+    method === "POST"
+  ) {
+    try {
+      const session = await requireDriver(pool, req, {
+        requireSelfie: true,
+      });
+
+      const orderId = asId(pathname.split("/")[4]);
+
+      const { rowCount } = await pool.query(
+        `
+        UPDATE orders
+        SET status = 'completed',
+            delivered_at = NOW()
+        WHERE id = $1
+          AND assigned_driver_id = $2
+          AND status = 'en_route'
+          AND delivery_photo_taken = true
+        `,
+        [orderId, session.driver_id]
+      );
+
+      if (!rowCount) {
+        return json(res, 400, {
+          error: "Delivery photo required",
+        });
+      }
+
+      return json(res, 200, {
+        ok: true,
+        status: "completed",
+      });
+    } catch (e) {
+      return json(res, 400, { error: e.message });
+    }
+  }
+
+  /* =====================================================
+     LIVE GPS TRACKING
+     POST /api/driver/location
+  ===================================================== */
+  if (pathname === "/api/driver/location" && method === "POST") {
+    try {
+      const session = await requireDriver(pool, req, {
+        requireSelfie: true,
+      });
+
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const data = JSON.parse(body);
+
+      await pool.query(
+        `
+        INSERT INTO driver_locations (
+          driver_id,
+          latitude,
+          longitude,
+          recorded_at
+        )
+        VALUES ($1, $2, $3, NOW())
+        `,
+        [session.driver_id, data.lat, data.lng]
+      );
+
+      return json(res, 200, { ok: true });
+    } catch (e) {
       return json(res, 400, { error: e.message });
     }
   }
