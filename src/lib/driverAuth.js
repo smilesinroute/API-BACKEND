@@ -14,6 +14,14 @@ function getBearerToken(req) {
   return m ? m[1].trim() : null;
 }
 
+function getCloudflareEmail(req) {
+  return (
+    req.headers["cf-access-authenticated-user-email"] ||
+    req.headers["x-auth-request-email"] ||
+    null
+  );
+}
+
 function newToken() {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -23,7 +31,6 @@ function newToken() {
  * Reads selfie status from drivers table
  */
 async function createDriverSession(pool, driverId) {
-  // Get real driver selfie status
   const { rows } = await pool.query(
     `
     SELECT selfie_verified
@@ -60,10 +67,33 @@ async function createDriverSession(pool, driverId) {
 
 /**
  * Require valid driver session
+ * Supports:
+ * - Bearer token sessions
+ * - Cloudflare Access email identity
  */
 async function requireDriver(pool, req, { requireSelfie = true } = {}) {
-  const token = getBearerToken(req);
-  if (!token) throw new Error("Missing Authorization token");
+  let token = getBearerToken(req);
+
+  // If no token, try Cloudflare identity
+  if (!token) {
+    const email = getCloudflareEmail(req);
+
+    if (email) {
+      const { rows } = await pool.query(
+        `SELECT id FROM drivers WHERE email = $1 LIMIT 1`,
+        [email]
+      );
+
+      if (!rows.length) {
+        throw new Error("Driver not found");
+      }
+
+      // Create session automatically
+      token = await createDriverSession(pool, rows[0].id);
+    } else {
+      throw new Error("Missing Authorization token");
+    }
+  }
 
   const { rows } = await pool.query(
     `
@@ -94,7 +124,6 @@ async function requireDriver(pool, req, { requireSelfie = true } = {}) {
     throw new Error("Driver inactive");
   }
 
-  // Use actual driver selfie status
   if (requireSelfie && !session.selfie_verified) {
     throw new Error("Selfie required");
   }
