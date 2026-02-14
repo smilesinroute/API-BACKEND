@@ -20,19 +20,26 @@ function newToken() {
 
 /**
  * Create a driver session
- * TABLE: driver_sessions
- * columns:
- * - id
- * - driver_id
- * - token
- * - selfie_completed
- * - expires_at
- * - created_at
+ * Reads selfie status from drivers table
  */
 async function createDriverSession(pool, driverId) {
-  const token = newToken();
+  // Get real driver selfie status
+  const { rows } = await pool.query(
+    `
+    SELECT selfie_verified
+    FROM drivers
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [driverId]
+  );
 
-  // expires in 24 hours (adjust if needed)
+  if (!rows.length) {
+    throw new Error("Driver not found");
+  }
+
+  const driver = rows[0];
+  const token = newToken();
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
   await pool.query(
@@ -43,9 +50,9 @@ async function createDriverSession(pool, driverId) {
       selfie_completed,
       expires_at
     )
-    VALUES ($1, $2, false, $3)
+    VALUES ($1, $2, $3, $4)
     `,
-    [driverId, token, expiresAt]
+    [driverId, token, !!driver.selfie_verified, expiresAt]
   );
 
   return token;
@@ -60,9 +67,16 @@ async function requireDriver(pool, req, { requireSelfie = true } = {}) {
 
   const { rows } = await pool.query(
     `
-    SELECT driver_id, selfie_completed, expires_at
-    FROM driver_sessions
-    WHERE token = $1
+    SELECT
+      ds.driver_id,
+      ds.selfie_completed,
+      ds.expires_at,
+      d.selfie_verified,
+      d.active,
+      d.status
+    FROM driver_sessions ds
+    JOIN drivers d ON d.id = ds.driver_id
+    WHERE ds.token = $1
     LIMIT 1
     `,
     [token]
@@ -76,7 +90,12 @@ async function requireDriver(pool, req, { requireSelfie = true } = {}) {
     throw new Error("Driver session expired");
   }
 
-  if (requireSelfie && !session.selfie_completed) {
+  if (!session.active || session.status === "inactive") {
+    throw new Error("Driver inactive");
+  }
+
+  // Use actual driver selfie status
+  if (requireSelfie && !session.selfie_verified) {
     throw new Error("Selfie required");
   }
 
