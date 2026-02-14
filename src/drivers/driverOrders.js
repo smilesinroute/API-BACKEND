@@ -19,23 +19,33 @@ function asId(v) {
  * POST /api/driver/order/:id/complete
  * POST /api/driver/location
  *
- * IMPORTANT:
- * Every response must:
- *   json(...)
- *   return true;
- * or the router will continue and break CORS.
+ * CRITICAL:
+ * requireDriver() may already send the response on auth failure.
+ * If that happens, we MUST NOT send another response (prevents headers-sent crash).
  */
+
+async function getSession(pool, req, res, opts) {
+  try {
+    return await requireDriver(pool, req, opts);
+  } catch (e) {
+    // requireDriver already responded (401), so we stop here safely.
+    if (!res.writableEnded) {
+      // fallback safety (only if requireDriver didn't respond for some reason)
+      json(res, 401, { error: e.message || "Unauthorized" });
+    }
+    return null;
+  }
+}
 
 async function handleDriverOrders(req, res, pool, pathname, method) {
   /* =====================================================
      GET /api/driver/orders
   ===================================================== */
   if (pathname === "/api/driver/orders" && method === "GET") {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: true,
-      });
+    const session = await getSession(pool, req, res, { requireSelfie: true });
+    if (!session) return true;
 
+    try {
       const { rows } = await pool.query(
         `
         SELECT
@@ -48,8 +58,10 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           scheduled_time
         FROM orders
         WHERE
-          (assigned_driver_id = $1
-            AND status IN ('assigned', 'en_route'))
+          (
+            assigned_driver_id = $1
+            AND status IN ('assigned', 'en_route')
+          )
           OR (
             assigned_driver_id IS NULL
             AND status = 'ready_for_dispatch'
@@ -62,26 +74,25 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       json(res, 200, { ok: true, orders: rows });
       return true;
     } catch (e) {
-      console.error("[DRIVER ORDERS] list error:", e.message);
-      json(res, 401, { error: e.message });
+      console.error("[DRIVER ORDERS] list error:", e);
+      json(res, 500, { error: "Server error" });
       return true;
     }
   }
 
   /* =====================================================
-     ACCEPT ORDER
+     POST /api/driver/order/:id/accept
   ===================================================== */
-  if (
-    pathname.startsWith("/api/driver/order/") &&
-    pathname.endsWith("/accept") &&
-    method === "POST"
-  ) {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: true,
-      });
+  if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/accept") && method === "POST") {
+    const session = await getSession(pool, req, res, { requireSelfie: true });
+    if (!session) return true;
 
+    try {
       const orderId = asId(pathname.split("/")[4]);
+      if (!orderId) {
+        json(res, 400, { error: "order_id missing" });
+        return true;
+      }
 
       const { rowCount } = await pool.query(
         `
@@ -92,6 +103,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           assigned_at = NOW()
         WHERE id = $1
           AND status = 'ready_for_dispatch'
+          AND assigned_driver_id IS NULL
         `,
         [orderId, session.driver_id]
       );
@@ -101,28 +113,28 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         return true;
       }
 
-      json(res, 200, { ok: true, status: "assigned" });
+      json(res, 200, { ok: true, order_id: orderId, status: "assigned" });
       return true;
     } catch (e) {
-      json(res, 400, { error: e.message });
+      console.error("[DRIVER ORDERS] accept error:", e);
+      json(res, 500, { error: "Server error" });
       return true;
     }
   }
 
   /* =====================================================
-     PICKUP PHOTO
+     POST /api/driver/order/:id/pickup-photo
   ===================================================== */
-  if (
-    pathname.startsWith("/api/driver/order/") &&
-    pathname.endsWith("/pickup-photo") &&
-    method === "POST"
-  ) {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: true,
-      });
+  if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/pickup-photo") && method === "POST") {
+    const session = await getSession(pool, req, res, { requireSelfie: true });
+    if (!session) return true;
 
+    try {
       const orderId = asId(pathname.split("/")[4]);
+      if (!orderId) {
+        json(res, 400, { error: "order_id missing" });
+        return true;
+      }
 
       await pool.query(
         `
@@ -136,28 +148,29 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         [orderId, session.driver_id]
       );
 
-      json(res, 200, { ok: true });
+      json(res, 200, { ok: true, order_id: orderId });
       return true;
     } catch (e) {
-      json(res, 400, { error: e.message });
+      console.error("[DRIVER ORDERS] pickup-photo error:", e);
+      json(res, 500, { error: "Server error" });
       return true;
     }
   }
 
   /* =====================================================
-     START ROUTE (requires pickup photo)
+     POST /api/driver/order/:id/start
+     Requires pickup photo
   ===================================================== */
-  if (
-    pathname.startsWith("/api/driver/order/") &&
-    pathname.endsWith("/start") &&
-    method === "POST"
-  ) {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: true,
-      });
+  if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/start") && method === "POST") {
+    const session = await getSession(pool, req, res, { requireSelfie: true });
+    if (!session) return true;
 
+    try {
       const orderId = asId(pathname.split("/")[4]);
+      if (!orderId) {
+        json(res, 400, { error: "order_id missing" });
+        return true;
+      }
 
       const { rowCount } = await pool.query(
         `
@@ -178,28 +191,28 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         return true;
       }
 
-      json(res, 200, { ok: true, status: "en_route" });
+      json(res, 200, { ok: true, order_id: orderId, status: "en_route" });
       return true;
     } catch (e) {
-      json(res, 400, { error: e.message });
+      console.error("[DRIVER ORDERS] start error:", e);
+      json(res, 500, { error: "Server error" });
       return true;
     }
   }
 
   /* =====================================================
-     DELIVERY PHOTO
+     POST /api/driver/order/:id/delivery-photo
   ===================================================== */
-  if (
-    pathname.startsWith("/api/driver/order/") &&
-    pathname.endsWith("/delivery-photo") &&
-    method === "POST"
-  ) {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: true,
-      });
+  if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/delivery-photo") && method === "POST") {
+    const session = await getSession(pool, req, res, { requireSelfie: true });
+    if (!session) return true;
 
+    try {
       const orderId = asId(pathname.split("/")[4]);
+      if (!orderId) {
+        json(res, 400, { error: "order_id missing" });
+        return true;
+      }
 
       await pool.query(
         `
@@ -213,28 +226,29 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         [orderId, session.driver_id]
       );
 
-      json(res, 200, { ok: true });
+      json(res, 200, { ok: true, order_id: orderId });
       return true;
     } catch (e) {
-      json(res, 400, { error: e.message });
+      console.error("[DRIVER ORDERS] delivery-photo error:", e);
+      json(res, 500, { error: "Server error" });
       return true;
     }
   }
 
   /* =====================================================
-     COMPLETE ORDER (requires delivery photo)
+     POST /api/driver/order/:id/complete
+     Requires delivery photo
   ===================================================== */
-  if (
-    pathname.startsWith("/api/driver/order/") &&
-    pathname.endsWith("/complete") &&
-    method === "POST"
-  ) {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: true,
-      });
+  if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/complete") && method === "POST") {
+    const session = await getSession(pool, req, res, { requireSelfie: true });
+    if (!session) return true;
 
+    try {
       const orderId = asId(pathname.split("/")[4]);
+      if (!orderId) {
+        json(res, 400, { error: "order_id missing" });
+        return true;
+      }
 
       const { rowCount } = await pool.query(
         `
@@ -255,27 +269,41 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         return true;
       }
 
-      json(res, 200, { ok: true, status: "completed" });
+      json(res, 200, { ok: true, order_id: orderId, status: "completed" });
       return true;
     } catch (e) {
-      json(res, 400, { error: e.message });
+      console.error("[DRIVER ORDERS] complete error:", e);
+      json(res, 500, { error: "Server error" });
       return true;
     }
   }
 
   /* =====================================================
-     LIVE GPS TRACKING
      POST /api/driver/location
   ===================================================== */
   if (pathname === "/api/driver/location" && method === "POST") {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: true,
-      });
+    const session = await getSession(pool, req, res, { requireSelfie: true });
+    if (!session) return true;
 
+    try {
       let body = "";
       for await (const chunk of req) body += chunk;
-      const data = JSON.parse(body);
+
+      let data;
+      try {
+        data = JSON.parse(body || "{}");
+      } catch {
+        json(res, 400, { error: "Invalid JSON body" });
+        return true;
+      }
+
+      const lat = Number(data.lat);
+      const lng = Number(data.lng);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        json(res, 400, { error: "lat and lng must be numbers" });
+        return true;
+      }
 
       await pool.query(
         `
@@ -287,13 +315,14 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         )
         VALUES ($1, $2, $3, NOW())
         `,
-        [session.driver_id, data.lat, data.lng]
+        [session.driver_id, lat, lng]
       );
 
       json(res, 200, { ok: true });
       return true;
     } catch (e) {
-      json(res, 400, { error: e.message });
+      console.error("[DRIVER ORDERS] location error:", e);
+      json(res, 500, { error: "Server error" });
       return true;
     }
   }
