@@ -7,8 +7,10 @@ function asId(v) {
 }
 
 /**
- * DRIVER ORDER LIFECYCLE
- * ------------------------------------------------
+ * =====================================================
+ * DRIVER ORDER LIFECYCLE ROUTES
+ * =====================================================
+ *
  * GET  /api/driver/orders
  * POST /api/driver/order/:id/accept
  * POST /api/driver/order/:id/pickup-photo
@@ -16,6 +18,12 @@ function asId(v) {
  * POST /api/driver/order/:id/delivery-photo
  * POST /api/driver/order/:id/complete
  * POST /api/driver/location
+ *
+ * IMPORTANT:
+ * Every response must:
+ *   json(...)
+ *   return true;
+ * or the router will continue and break CORS.
  */
 
 async function handleDriverOrders(req, res, pool, pathname, method) {
@@ -40,8 +48,8 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           scheduled_time
         FROM orders
         WHERE
-          assigned_driver_id = $1
-          AND status IN ('assigned', 'en_route')
+          (assigned_driver_id = $1
+            AND status IN ('assigned', 'en_route'))
           OR (
             assigned_driver_id IS NULL
             AND status = 'ready_for_dispatch'
@@ -51,10 +59,12 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         [session.driver_id]
       );
 
-      return json(res, 200, { ok: true, orders: rows });
+      json(res, 200, { ok: true, orders: rows });
+      return true;
     } catch (e) {
       console.error("[DRIVER ORDERS] list error:", e.message);
-      return json(res, 401, { error: e.message });
+      json(res, 401, { error: e.message });
+      return true;
     }
   }
 
@@ -87,17 +97,15 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       );
 
       if (!rowCount) {
-        return json(res, 400, {
-          error: "Order not available",
-        });
+        json(res, 400, { error: "Order not available" });
+        return true;
       }
 
-      return json(res, 200, {
-        ok: true,
-        status: "assigned",
-      });
+      json(res, 200, { ok: true, status: "assigned" });
+      return true;
     } catch (e) {
-      return json(res, 400, { error: e.message });
+      json(res, 400, { error: e.message });
+      return true;
     }
   }
 
@@ -119,23 +127,25 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       await pool.query(
         `
         UPDATE orders
-        SET pickup_photo_taken = true,
-            pickup_photo_at = NOW()
+        SET
+          pickup_photo_taken = true,
+          pickup_photo_at = NOW()
         WHERE id = $1
           AND assigned_driver_id = $2
         `,
         [orderId, session.driver_id]
       );
 
-      return json(res, 200, { ok: true });
+      json(res, 200, { ok: true });
+      return true;
     } catch (e) {
-      return json(res, 400, { error: e.message });
+      json(res, 400, { error: e.message });
+      return true;
     }
   }
 
   /* =====================================================
-     START ROUTE
-     (requires pickup photo)
+     START ROUTE (requires pickup photo)
   ===================================================== */
   if (
     pathname.startsWith("/api/driver/order/") &&
@@ -152,8 +162,9 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       const { rowCount } = await pool.query(
         `
         UPDATE orders
-        SET status = 'en_route',
-            pickup_at = NOW()
+        SET
+          status = 'en_route',
+          pickup_at = NOW()
         WHERE id = $1
           AND assigned_driver_id = $2
           AND status = 'assigned'
@@ -163,17 +174,15 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       );
 
       if (!rowCount) {
-        return json(res, 400, {
-          error: "Pickup photo required",
-        });
+        json(res, 400, { error: "Pickup photo required" });
+        return true;
       }
 
-      return json(res, 200, {
-        ok: true,
-        status: "en_route",
-      });
+      json(res, 200, { ok: true, status: "en_route" });
+      return true;
     } catch (e) {
-      return json(res, 400, { error: e.message });
+      json(res, 400, { error: e.message });
+      return true;
     }
   }
 
@@ -195,23 +204,25 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       await pool.query(
         `
         UPDATE orders
-        SET delivery_photo_taken = true,
-            delivery_photo_at = NOW()
+        SET
+          delivery_photo_taken = true,
+          delivery_photo_at = NOW()
         WHERE id = $1
           AND assigned_driver_id = $2
         `,
         [orderId, session.driver_id]
       );
 
-      return json(res, 200, { ok: true });
+      json(res, 200, { ok: true });
+      return true;
     } catch (e) {
-      return json(res, 400, { error: e.message });
+      json(res, 400, { error: e.message });
+      return true;
     }
   }
 
   /* =====================================================
-     COMPLETE ORDER
-     (requires delivery photo)
+     COMPLETE ORDER (requires delivery photo)
   ===================================================== */
   if (
     pathname.startsWith("/api/driver/order/") &&
@@ -228,8 +239,9 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       const { rowCount } = await pool.query(
         `
         UPDATE orders
-        SET status = 'completed',
-            delivered_at = NOW()
+        SET
+          status = 'completed',
+          delivered_at = NOW()
         WHERE id = $1
           AND assigned_driver_id = $2
           AND status = 'en_route'
@@ -239,17 +251,15 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       );
 
       if (!rowCount) {
-        return json(res, 400, {
-          error: "Delivery photo required",
-        });
+        json(res, 400, { error: "Delivery photo required" });
+        return true;
       }
 
-      return json(res, 200, {
-        ok: true,
-        status: "completed",
-      });
+      json(res, 200, { ok: true, status: "completed" });
+      return true;
     } catch (e) {
-      return json(res, 400, { error: e.message });
+      json(res, 400, { error: e.message });
+      return true;
     }
   }
 
@@ -280,9 +290,11 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         [session.driver_id, data.lat, data.lng]
       );
 
-      return json(res, 200, { ok: true });
+      json(res, 200, { ok: true });
+      return true;
     } catch (e) {
-      return json(res, 400, { error: e.message });
+      json(res, 400, { error: e.message });
+      return true;
     }
   }
 
