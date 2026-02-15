@@ -1,269 +1,275 @@
-"use strict";
-
-const crypto = require("crypto");
-const {
-  json,
-  createDriverSession,
-  requireDriver,
-} = require("../lib/driverAuth");
-const { parseMultipart, fileToBuffer } = require("../lib/multipart");
-const { uploadToStorage } = require("../lib/supabaseStorage");
-
 /**
- * ======================================================
- * DRIVER API ROUTES
- * ======================================================
+ * src/drivers/driverRoutes.js
  *
- * POST /api/driver/login
- * POST /api/driver/selfie
- * GET  /api/driver/me
- * GET  /api/driver/orders
+ * Production-hardened Driver Routes
+ * - Cloudflare Access auto-login (header-based)
+ * - Manual email/password login (bcrypt + legacy fallback)
+ * - JWT session tokens
+ * - Driver orders fetching (Bearer token)
  *
- * NOTE:
- * Custom HTTP router (no Express)
+ * Requires:
+ *   npm install bcrypt jsonwebtoken
+ *
+ * ENV:
+ *   JWT_SECRET=strong_secret_here
+ *   DRIVER_JWT_EXPIRES_IN=12h (optional)
  */
 
-/* ======================================================
-   HELPERS
-====================================================== */
+"use strict";
 
-function asTrimmedString(v) {
-  return String(v ?? "").trim();
+const url = require("url");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("Missing required env: JWT_SECRET");
 }
 
-function asLowerEmail(v) {
-  return asTrimmedString(v).toLowerCase();
+const JWT_EXPIRES_IN = process.env.DRIVER_JWT_EXPIRES_IN || "12h";
+
+/* --------------------------------------------------
+   Helpers
+-------------------------------------------------- */
+
+function sendJSON(res, status, data) {
+  if (res.headersSent) return;
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(data));
 }
 
-/* ======================================================
-   BODY PARSING
-====================================================== */
+function normalizeEmail(v) {
+  return String(v || "").trim().toLowerCase();
+}
 
-function readBody(req, maxBytes = 1_000_000) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let total = 0;
+function createDriverToken(driver) {
+  return jwt.sign(
+    {
+      id: driver.id,
+      email: driver.email,
+      role: "driver",
+    },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
+  );
+}
+
+function readRequestBody(req, { maxBytes = 1024 * 64 } = {}) {
+  return new Promise((resolve) => {
+    let body = "";
+    let bytes = 0;
+    let done = false;
 
     req.on("data", (chunk) => {
-      total += chunk.length;
-      if (total > maxBytes) {
-        req.destroy();
-        reject(new Error("Request body too large"));
-        return;
+      if (done) return;
+      bytes += chunk.length;
+
+      if (bytes > maxBytes) {
+        done = true;
+        try {
+          req.destroy();
+        } catch {}
+        return resolve({ __tooLarge: true });
       }
-      chunks.push(chunk);
+
+      body += chunk.toString("utf8");
     });
 
-    req.on("end", () =>
-      resolve(Buffer.concat(chunks).toString("utf8"))
-    );
-    req.on("error", reject);
+    req.on("end", () => {
+      if (done) return;
+      if (!body) return resolve({});
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        resolve({ __invalidJson: true });
+      }
+    });
+
+    req.on("error", () => resolve({ __readError: true }));
   });
 }
 
-async function readJson(req) {
-  const ct = String(req.headers["content-type"] || "").toLowerCase();
-  if (ct && !ct.includes("application/json")) {
-    throw new Error("Content-Type must be application/json");
+function getCloudflareEmail(req) {
+  const v =
+    req.headers["cf-access-authenticated-user-email"] ||
+    req.headers["x-cf-access-authenticated-user-email"];
+  return normalizeEmail(v);
+}
+
+function extractDriverFromToken(req) {
+  const auth = String(req.headers.authorization || "");
+
+  if (!auth.toLowerCase().startsWith("bearer ")) {
+    return { error: "Missing Authorization token" };
   }
 
-  const body = await readBody(req);
-  if (!body) return {};
+  const token = auth.slice(7).trim();
+  if (!token) return { error: "Missing Authorization token" };
 
   try {
-    return JSON.parse(body);
+    const payload = jwt.verify(token, JWT_SECRET);
+    return { payload };
   } catch {
-    throw new Error("Invalid JSON body");
+    return { error: "Invalid token" };
   }
 }
 
-/* ======================================================
-   ROUTER
-====================================================== */
+/* --------------------------------------------------
+   DB helpers
+-------------------------------------------------- */
 
-async function handleDriverRoutes(req, res, pool, pathname, method) {
+async function findDriverByEmail(db, email) {
+  const { rows } = await db.query(
+    `
+    SELECT id, email, password, active, status
+    FROM drivers
+    WHERE lower(email) = lower($1)
+    LIMIT 1
+    `,
+    [email]
+  );
+  return rows[0] || null;
+}
 
-  /* ======================================================
-     POST /api/driver/login
-  ====================================================== */
-  if (pathname === "/api/driver/login" && method === "POST") {
-    try {
-      const body = await readJson(req);
-      const email = asLowerEmail(body.email);
-      const pin = asTrimmedString(body.pin);
+/* --------------------------------------------------
+   Route Handlers
+-------------------------------------------------- */
 
-      if (!email) return json(res, 400, { error: "email is required" });
-      if (!pin) return json(res, 400, { error: "pin is required" });
+async function handleDriverLogin(req, res, db) {
+  try {
+    const cfEmail = getCloudflareEmail(req);
 
-      const { rows } = await pool.query(
-        `
-        SELECT id, email, status
-        FROM drivers
-        WHERE lower(email) = lower($1)
-        LIMIT 1
-        `,
-        [email]
-      );
+    // Cloudflare Access auto-login
+    if (cfEmail) {
+      const driver = await findDriverByEmail(db, cfEmail);
 
-      if (!rows.length) {
-        return json(res, 401, { error: "Invalid credentials" });
+      if (!driver || driver.active === false || driver.status === "inactive") {
+        return sendJSON(res, 403, { error: "Driver not authorized" });
       }
 
-      const driver = rows[0];
-      if (driver.status === "offline") {
-        return json(res, 403, { error: "Driver inactive" });
-      }
+      const token = createDriverToken({
+        id: driver.id,
+        email: driver.email,
+      });
 
-      const token = await createDriverSession(pool, driver.id);
-
-      return json(res, 200, {
+      return sendJSON(res, 200, {
         ok: true,
         token,
-        driver_id: driver.id,
-        selfie_required: true,
+        driver: {
+          id: driver.id,
+          email: driver.email,
+        },
       });
-    } catch (err) {
-      console.error("[DRIVER] login error:", err.message);
-      return json(res, 500, { error: "Server error" });
     }
+
+    // Manual login fallback
+    const body = await readRequestBody(req);
+
+    if (body.__tooLarge) {
+      return sendJSON(res, 413, { error: "Request body too large" });
+    }
+    if (body.__invalidJson) {
+      return sendJSON(res, 400, { error: "Invalid JSON body" });
+    }
+
+    const email = normalizeEmail(body.email);
+    const password = String(body.password || "");
+
+    if (!email || !password) {
+      return sendJSON(res, 400, { error: "Email and password required" });
+    }
+
+    const driver = await findDriverByEmail(db, email);
+
+    // Do not reveal whether email exists
+    if (!driver || driver.active === false || driver.status === "inactive") {
+      return sendJSON(res, 401, { error: "Invalid credentials" });
+    }
+
+    const stored = String(driver.password || "");
+    let ok = false;
+
+    if (stored.startsWith("$2")) {
+      // bcrypt hash
+      ok = await bcrypt.compare(password, stored);
+    } else {
+      // legacy plaintext fallback
+      ok = password === stored;
+    }
+
+    if (!ok) {
+      return sendJSON(res, 401, { error: "Invalid credentials" });
+    }
+
+    const token = createDriverToken({
+      id: driver.id,
+      email: driver.email,
+    });
+
+    return sendJSON(res, 200, {
+      ok: true,
+      token,
+      driver: {
+        id: driver.id,
+        email: driver.email,
+      },
+    });
+  } catch (err) {
+    console.error("[DRIVER LOGIN ERROR]", err);
+    return sendJSON(res, 500, { error: "Login failed" });
+  }
+}
+
+async function handleDriverOrders(req, res, db) {
+  try {
+    const { payload, error } = extractDriverFromToken(req);
+
+    if (!payload) {
+      return sendJSON(res, 401, { error: error || "Unauthorized" });
+    }
+
+    if (!payload.id || payload.role !== "driver") {
+      return sendJSON(res, 403, { error: "Forbidden" });
+    }
+
+    const { rows } = await db.query(
+      `
+      SELECT id, customer, address, status, service_type
+      FROM orders
+      WHERE driver_id = $1
+      ORDER BY id DESC
+      `,
+      [payload.id]
+    );
+
+    return sendJSON(res, 200, {
+      ok: true,
+      orders: rows,
+    });
+  } catch (err) {
+    console.error("[DRIVER ORDERS ERROR]", err);
+    return sendJSON(res, 500, { error: "Failed to fetch driver orders" });
+  }
+}
+
+/* --------------------------------------------------
+   Main Router
+-------------------------------------------------- */
+
+async function handleDriverRoutes(req, res, db) {
+  const parsed = url.parse(req.url, true);
+  const pathname = parsed.pathname;
+  const method = req.method;
+
+  if (pathname === "/api/driver/login" && method === "POST") {
+    await handleDriverLogin(req, res, db);
+    return true;
   }
 
-  /* ======================================================
-     POST /api/driver/selfie
-  ====================================================== */
-  if (pathname === "/api/driver/selfie" && method === "POST") {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: false,
-      });
-
-      const { files } = await parseMultipart(req, {
-        maxFileSize: 6 * 1024 * 1024,
-      });
-
-      const selfieFile = files?.selfie;
-      if (!selfieFile) {
-        return json(res, 400, { error: "Missing selfie file" });
-      }
-
-      const buffer = await fileToBuffer(selfieFile);
-      const mime = String(selfieFile.mimetype || "image/jpeg");
-      const ext =
-        String(selfieFile.originalFilename || "jpg")
-          .split(".")
-          .pop()
-          .toLowerCase();
-
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const key = crypto.randomUUID();
-
-      const storagePath =
-        `drivers/${session.driver_id}/selfies/${stamp}_${key}.${ext}`;
-
-      const uploaded = await uploadToStorage({
-        bucket:
-          process.env.SUPABASE_STORAGE_BUCKET_DRIVER_SELFIES ||
-          "driver-selfies",
-        path: storagePath,
-        buffer,
-        contentType: mime,
-      });
-
-      await pool.query(
-        `
-        UPDATE driver_sessions
-        SET selfie_verified = true
-        WHERE token = $1
-        `,
-        [session.token]
-      );
-
-      return json(res, 200, {
-        ok: true,
-        driver_id: session.driver_id,
-        selfie_verified: true,
-        public_url: uploaded.publicUrl || null,
-      });
-    } catch (err) {
-      console.error("[DRIVER] selfie error:", err.message);
-      return json(res, 400, { error: err.message });
-    }
-  }
-
-  /* ======================================================
-     GET /api/driver/me
-  ====================================================== */
-  if (pathname === "/api/driver/me" && method === "GET") {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: false,
-      });
-
-      const { rows } = await pool.query(
-        `
-        SELECT
-          id,
-          name,
-          email,
-          phone,
-          vehicle_type,
-          status,
-          selfie_verified
-        FROM drivers
-        WHERE id = $1
-        `,
-        [session.driver_id]
-      );
-
-      if (!rows.length) {
-        return json(res, 404, { error: "Driver not found" });
-      }
-
-      return json(res, 200, {
-        ok: true,
-        driver: rows[0],
-      });
-    } catch (err) {
-      console.error("[DRIVER] me error:", err.message);
-      return json(res, 401, { error: err.message });
-    }
-  }
-
-  /* ======================================================
-     GET /api/driver/orders
-     → Assigned + active jobs for driver
-  ====================================================== */
   if (pathname === "/api/driver/orders" && method === "GET") {
-    try {
-      const session = await requireDriver(pool, req, {
-        requireSelfie: true,
-      });
-
-      const { rows } = await pool.query(
-        `
-        SELECT
-          o.id,
-          o.status,
-          o.pickup_address,
-          o.delivery_address,
-          o.scheduled_date,
-          o.scheduled_time
-        FROM orders o
-        WHERE o.assigned_driver_id = $1
-          AND o.status IN ('assigned', 'in_progress')
-        ORDER BY o.scheduled_date ASC, o.scheduled_time ASC
-        `,
-        [session.driver_id]
-      );
-
-      return json(res, 200, {
-        ok: true,
-        orders: rows,
-      });
-    } catch (err) {
-      console.error("[DRIVER] orders error:", err.message);
-      return json(res, 401, { error: err.message });
-    }
+    await handleDriverOrders(req, res, db);
+    return true;
   }
 
   return false;
