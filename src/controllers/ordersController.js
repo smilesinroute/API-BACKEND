@@ -28,6 +28,20 @@ const ORDER_TRANSITIONS = {
 };
 
 /* ======================================================
+   HELPERS
+====================================================== */
+function isValidEmail(value) {
+  if (!value || typeof value !== "string") return false;
+  const email = value.trim().toLowerCase();
+  return email.includes("@") && email.length >= 5;
+}
+
+function toNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/* ======================================================
    MAIN HANDLER
 ====================================================== */
 async function handleOrders(req, res, pool, pathname, method, json) {
@@ -71,11 +85,17 @@ async function handleOrders(req, res, pool, pathname, method, json) {
   if (method === "POST" && parts.length === 2) {
     const body = await readJson(req);
 
-    if (!body.customer_email) {
+    const email = String(body.customer_email || "")
+      .trim()
+      .toLowerCase();
+
+    if (!isValidEmail(email)) {
       return json(res, 400, {
-        error: "customer_email is required",
+        error: "Valid customer_email is required",
       });
     }
+
+    const totalAmount = toNumber(body.total_amount, 0);
 
     const { rows } = await pool.query(
       `
@@ -102,13 +122,13 @@ async function handleOrders(req, res, pool, pathname, method, json) {
       `,
       [
         body.customer_id || null,
-        body.customer_email,
+        email,
         body.pickup_address || null,
         body.delivery_address || null,
         body.scheduled_date || null,
         body.scheduled_time || null,
-        body.distance_miles || 0,
-        body.total_amount || 0,
+        toNumber(body.distance_miles, 0),
+        totalAmount,
       ]
     );
 
@@ -240,7 +260,7 @@ async function handleOrders(req, res, pool, pathname, method, json) {
 }
 
 /* ======================================================
-   Minimal JSON body reader (Node HTTP safe)
+   MINIMAL JSON BODY READER
 ====================================================== */
 function readJson(req) {
   return new Promise((resolve, reject) => {
