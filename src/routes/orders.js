@@ -1,3 +1,4 @@
+
 "use strict";
 
 const express = require("express");
@@ -5,199 +6,181 @@ const router = express.Router();
 const pool = require("../utils/db");
 
 /* ======================================================
-   ORDER STATUS RULES (ADMIN ONLY)
+   DRIVER AUTH MIDDLEWARE
+   - Replace with real JWT/session verification later
+   - For now: token value = driver ID
 ====================================================== */
+function requireDriver(req, res, next) {
+  const header = String(req.headers.authorization || "");
 
-const ALLOWED_STATUSES = [
-  "confirmed_pending_payment",
-  "paid",
-  "assigned",
-  "completed",
-  "canceled",
-];
-
-const ALLOWED_TRANSITIONS = {
-  confirmed_pending_payment: ["paid", "canceled"],
-  paid: ["assigned", "canceled"],
-  assigned: ["completed", "canceled"],
-  completed: [],
-  canceled: [],
-};
-
-/* ======================================================
-   GET /orders — list all orders
-====================================================== */
-router.get("/", async (_req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT *
-      FROM orders
-      ORDER BY created_at DESC
-    `);
-
-    res.json(rows);
-  } catch (err) {
-    console.error("[ORDERS] fetch all:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-/* ======================================================
-   GET /orders/:id — single order
-====================================================== */
-router.get("/:id", async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT * FROM orders WHERE id = $1 LIMIT 1`,
-      [req.params.id]
-    );
-
-    if (!rows.length) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    res.json(rows[0]);
-  } catch (err) {
-    console.error("[ORDERS] fetch one:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-/* ======================================================
-   POST /orders — create order
-====================================================== */
-router.post("/", async (req, res) => {
-  const {
-    customer_id = null,
-    customer_email,
-    pickup_address,
-    delivery_address,
-    scheduled_date,
-    scheduled_time,
-    distance_miles = 0,
-    total_amount = 0,
-  } = req.body || {};
-
-  if (!customer_email) {
-    return res.status(400).json({
-      error: "customer_email is required",
+  if (!header.toLowerCase().startsWith("bearer ")) {
+    return res.status(401).json({
+      error: "Missing Authorization token",
     });
   }
 
-  if (!pickup_address || !delivery_address) {
-    return res.status(400).json({
-      error: "pickup_address and delivery_address are required",
+  const token = header.replace(/^Bearer\s+/i, "").trim();
+
+  if (!token) {
+    return res.status(401).json({
+      error: "Invalid Authorization token",
     });
   }
+
+  // TODO: replace with real token decoding
+  req.driverId = token;
+  next();
+}
+
+router.use(requireDriver);
+
+/* ======================================================
+   HELPERS
+====================================================== */
+function serverError(res, err, label) {
+  console.error(`[DRIVER] ${label}:`, err);
+  return res.status(500).json({
+    error: "Internal server error",
+  });
+}
+
+/* ======================================================
+   GET /api/driver/orders
+   - Returns:
+     • paid orders available for assignment
+     • orders already assigned to driver
+====================================================== */
+router.get("/orders", async (req, res) => {
+  const driverId = req.driverId;
 
   try {
     const { rows } = await pool.query(
       `
-      INSERT INTO orders (
-        customer_id,
-        customer_email,
-        pickup_address,
-        delivery_address,
-        scheduled_date,
-        scheduled_time,
-        distance_miles,
-        total_amount,
-        status,
-        payment_status
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'confirmed_pending_payment','unpaid')
-      RETURNING *
+      SELECT *
+      FROM orders
+      WHERE
+        status = 'paid'
+        OR assigned_driver_id = $1
+      ORDER BY created_at ASC
       `,
-      [
-        customer_id,
-        customer_email,
-        pickup_address,
-        delivery_address,
-        scheduled_date,
-        scheduled_time,
-        distance_miles,
-        total_amount,
-      ]
+      [driverId]
     );
 
-    console.log("[ORDERS] created:", rows[0].id);
-    res.status(201).json(rows[0]);
+    return res.json({
+      ok: true,
+      orders: rows,
+    });
   } catch (err) {
-    console.error("[ORDERS] create:", err);
-    res.status(500).json({ error: "Internal server error" });
+    return serverError(res, err, "fetch orders");
   }
 });
 
 /* ======================================================
-   PUT /orders/:id — update status (ADMIN ONLY)
+   POST /api/driver/orders/:id/accept
+   - Driver accepts a paid order
 ====================================================== */
-router.put("/:id", async (req, res) => {
-  const { status: nextStatus } = req.body || {};
-
-  if (!nextStatus) {
-    return res.status(400).json({ error: "status is required" });
-  }
-
-  if (!ALLOWED_STATUSES.includes(nextStatus)) {
-    return res.status(400).json({ error: "Invalid status value" });
-  }
+router.post("/orders/:id/accept", async (req, res) => {
+  const driverId = req.driverId;
+  const orderId = req.params.id;
 
   try {
-    const current = await pool.query(
-      `SELECT status FROM orders WHERE id = $1`,
-      [req.params.id]
+    const { rows } = await pool.query(
+      `
+      UPDATE orders
+      SET
+        status = 'assigned',
+        assigned_driver_id = $1,
+        assigned_at = NOW()
+      WHERE
+        id = $2
+        AND status = 'paid'
+      RETURNING *
+      `,
+      [driverId, orderId]
     );
 
-    if (!current.rows.length) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    const currentStatus = current.rows[0].status;
-    const allowedNext = ALLOWED_TRANSITIONS[currentStatus] || [];
-
-    if (!allowedNext.includes(nextStatus)) {
-      return res.status(400).json({
-        error: `Invalid status transition from '${currentStatus}' to '${nextStatus}'`,
+    if (!rows.length) {
+      return res.status(409).json({
+        error: "Order not available for assignment",
       });
     }
 
-    const updated = await pool.query(
-      `
-      UPDATE orders
-      SET status = $1
-      WHERE id = $2
-      RETURNING *
-      `,
-      [nextStatus, req.params.id]
-    );
-
-    res.json(updated.rows[0]);
+    return res.json(rows[0]);
   } catch (err) {
-    console.error("[ORDERS] update status:", err);
-    res.status(500).json({ error: "Internal server error" });
+    return serverError(res, err, "accept order");
   }
 });
 
 /* ======================================================
-   DELETE /orders/:id — hard delete (ADMIN ONLY)
+   POST /api/driver/orders/:id/pickup
+   - Driver confirms pickup
 ====================================================== */
-router.delete("/:id", async (req, res) => {
+router.post("/orders/:id/pickup", async (req, res) => {
+  const driverId = req.driverId;
+  const orderId = req.params.id;
+
   try {
     const { rows } = await pool.query(
-      `DELETE FROM orders WHERE id = $1 RETURNING *`,
-      [req.params.id]
+      `
+      UPDATE orders
+      SET
+        status = 'in_progress',
+        picked_up_at = NOW()
+      WHERE
+        id = $1
+        AND assigned_driver_id = $2
+        AND status = 'assigned'
+      RETURNING *
+      `,
+      [orderId, driverId]
     );
 
     if (!rows.length) {
-      return res.status(404).json({ error: "Order not found" });
+      return res.status(409).json({
+        error: "Order not assigned or invalid state",
+      });
     }
 
-    res.json(rows[0]);
+    return res.json(rows[0]);
   } catch (err) {
-    console.error("[ORDERS] delete:", err);
-    res.status(500).json({ error: "Internal server error" });
+    return serverError(res, err, "pickup");
+  }
+});
+
+/* ======================================================
+   POST /api/driver/orders/:id/delivered
+   - Driver confirms delivery
+====================================================== */
+router.post("/orders/:id/delivered", async (req, res) => {
+  const driverId = req.driverId;
+  const orderId = req.params.id;
+
+  try {
+    const { rows } = await pool.query(
+      `
+      UPDATE orders
+      SET
+        status = 'completed',
+        delivered_at = NOW()
+      WHERE
+        id = $1
+        AND assigned_driver_id = $2
+        AND status = 'in_progress'
+      RETURNING *
+      `,
+      [orderId, driverId]
+    );
+
+    if (!rows.length) {
+      return res.status(409).json({
+        error: "Order not in progress or not assigned",
+      });
+    }
+
+    return res.json(rows[0]);
+  } catch (err) {
+    return serverError(res, err, "delivered");
   }
 });
 
 module.exports = router;
-
