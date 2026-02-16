@@ -1,85 +1,125 @@
-// src/routes/quote.js
-const express = require('express');
-const router = express.Router();
-const pool = require('../utils/db');
-const axios = require('axios');
+"use strict";
 
-// Helper: calculate distance using Google Maps API
-async function getDistanceMiles(origin, destination) {
-  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+/**
+ * Quote Route (Production)
+ * -------------------------
+ * - Plain Node router (NO Express)
+ * - Uses shared distanceMatrix helper
+ * - Pulls pricing from database
+ */
 
-  const url = `https://maps.googleapis.com/maps/api/distancematrix/json?units=imperial&origins=${encodeURIComponent(
-    origin
-  )}&destinations=${encodeURIComponent(destination)}&key=${apiKey}`;
+const { getDistanceMiles } = require("../lib/distanceMatrix");
 
-  const response = await axios.get(url);
-
-  if (!response.data.rows?.[0]?.elements?.[0]?.distance) {
-    throw new Error("Unable to calculate distance");
-  }
-
-  const distanceText = response.data.rows[0].elements[0].distance.text; // e.g. "12.3 mi"
-  return parseFloat(distanceText.replace(" mi", ""));
+/* ======================================================
+   HELPERS
+====================================================== */
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
 }
 
-// Helper: Fetch pricing rules from database
-async function getPricingFor(region, serviceType, vehicleType) {
-  const query = `
+function toNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+/* ======================================================
+   PRICING LOOKUP
+====================================================== */
+async function getPricingFor(pool, region, serviceType, vehicleType) {
+  const { rows } = await pool.query(
+    `
     SELECT *
     FROM pricing
     WHERE region = $1
       AND service_type = $2
       AND vehicle_type = $3
-    LIMIT 1;
-  `;
+    LIMIT 1
+    `,
+    [region, serviceType, vehicleType]
+  );
 
-  const { rows } = await pool.query(query, [region, serviceType, vehicleType]);
-  if (rows.length === 0) throw new Error("No pricing rule found");
+  if (!rows.length) {
+    throw new Error("No pricing rule found");
+  }
 
   return rows[0];
 }
 
-// Main Quote Endpoint
-router.post('/quote', async (req, res) => {
-  try {
-    const {
-      serviceType,        // courier | notary | ron
-      region,             // OR | TX | CA | etc.
-      vehicleType,        // car | suv | van
-      pickupAddress,
-      dropoffAddress,
-      isFragile,
-      isPriority,
-      isTimeSensitive,
-      isAfterHours
-    } = req.body;
+/* ======================================================
+   MAIN HANDLER
+====================================================== */
+async function handleQuote(req, res, pool, pathname, method, json) {
+  if (pathname !== "/api/quote" || method !== "POST") {
+    return false;
+  }
 
-    if (!serviceType || !region) {
-      return res.status(400).json({ error: "Missing required fields" });
+  try {
+    const body = await readJson(req);
+
+    const serviceType = String(body.serviceType || "").trim();
+    const region = String(body.region || "").trim();
+    const vehicleType = String(body.vehicleType || "car").trim();
+
+    const pickupAddress = String(body.pickupAddress || "").trim();
+    const dropoffAddress = String(body.dropoffAddress || "").trim();
+
+    if (!isNonEmptyString(serviceType) || !isNonEmptyString(region)) {
+      return json(res, 400, {
+        error: "serviceType and region are required",
+      });
     }
 
-    // Pull pricing rules
-    const pricing = await getPricingFor(region, serviceType, vehicleType);
+    const pricing = await getPricingFor(
+      pool,
+      region,
+      serviceType,
+      vehicleType
+    );
 
-    let baseFee = Number(pricing.base_fee);
-    let perMile = Number(pricing.rate_per_mile);
+    let baseFee = toNumber(pricing.base_fee, 0);
+    let perMile = toNumber(pricing.rate_per_mile, 0);
     let distance = 0;
 
-    // Only courier requires distance
     if (serviceType === "courier") {
+      if (!pickupAddress || !dropoffAddress) {
+        return json(res, 400, {
+          error: "pickupAddress and dropoffAddress are required",
+        });
+      }
+
       distance = await getDistanceMiles(pickupAddress, dropoffAddress);
     }
 
     let total = baseFee + distance * perMile;
 
-    // Add-ons
-    if (isFragile) total += pricing.fragile_fee || 0;
-    if (isPriority) total += pricing.priority_fee || 0;
-    if (isTimeSensitive) total += pricing.time_sensitive_fee || 0;
-    if (isAfterHours) total += pricing.after_hours_fee || 0;
+    const fragile = body.isFragile ? toNumber(pricing.fragile_fee, 0) : 0;
+    const priority = body.isPriority ? toNumber(pricing.priority_fee, 0) : 0;
+    const timeSensitive = body.isTimeSensitive
+      ? toNumber(pricing.time_sensitive_fee, 0)
+      : 0;
+    const afterHours = body.isAfterHours
+      ? toNumber(pricing.after_hours_fee, 0)
+      : 0;
 
-    return res.json({
-      success: true,
+    total += fragile + priority + timeSensitive + afterHours;
+
+    return json(res, 200, {
+      ok: true,
       serviceType,
       region,
       vehicleType,
@@ -87,19 +127,19 @@ router.post('/quote', async (req, res) => {
       breakdown: {
         baseFee,
         perMile,
-        fragile: isFragile ? pricing.fragile_fee : 0,
-        priority: isPriority ? pricing.priority_fee : 0,
-        timeSensitive: isTimeSensitive ? pricing.time_sensitive_fee : 0,
-        afterHours: isAfterHours ? pricing.after_hours_fee : 0
+        fragile,
+        priority,
+        timeSensitive,
+        afterHours,
       },
-      total
+      total: Number(total.toFixed(2)),
     });
-
   } catch (err) {
-    console.error("QUOTE ERROR:", err);
-    return res.status(500).json({ error: err.message });
+    console.error("[QUOTE ERROR]", err);
+    return json(res, 500, {
+      error: err.message || "Quote calculation failed",
+    });
   }
-});
+}
 
-module.exports = router;
-
+module.exports = { handleQuote };
