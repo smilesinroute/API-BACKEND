@@ -5,9 +5,13 @@
  * - Node 18+ (native fetch)
  * - Google Maps Distance Matrix API
  */
+
 async function getDistanceMiles(pickup, delivery) {
   const key = process.env.GOOGLE_MAPS_API_KEY;
-  if (!key) throw new Error("Missing GOOGLE_MAPS_API_KEY on server");
+
+  if (!key) {
+    throw new Error("Missing GOOGLE_MAPS_API_KEY on server");
+  }
 
   if (!pickup || !delivery) {
     throw new Error("pickup and delivery addresses are required");
@@ -19,7 +23,6 @@ async function getDistanceMiles(pickup, delivery) {
     `&destinations=${encodeURIComponent(delivery)}` +
     `&key=${encodeURIComponent(key)}`;
 
-  // Timeout protection (10s)
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
 
@@ -27,19 +30,24 @@ async function getDistanceMiles(pickup, delivery) {
   try {
     res = await fetch(url, { signal: controller.signal });
   } catch (err) {
+    console.error("[DISTANCE] Network error:", err.message);
     throw new Error("Failed to reach Google Distance Matrix API");
   } finally {
     clearTimeout(timeout);
   }
 
   if (!res.ok) {
+    console.error("[DISTANCE] HTTP error:", res.status);
     throw new Error(`DistanceMatrix HTTP ${res.status}`);
   }
 
   const data = await res.json();
 
   if (data.status !== "OK") {
-    throw new Error(data.error_message || `DistanceMatrix status: ${data.status}`);
+    console.error("[DISTANCE] API status error:", data);
+    throw new Error(
+      data.error_message || `DistanceMatrix status: ${data.status}`
+    );
   }
 
   const element = data.rows?.[0]?.elements?.[0];
@@ -65,3 +73,4 @@ async function getDistanceMiles(pickup, delivery) {
 }
 
 module.exports = { getDistanceMiles };
+
