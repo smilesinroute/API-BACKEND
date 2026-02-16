@@ -5,16 +5,16 @@
  * ==============================================
  * - Plain Node.js routing (NO Express)
  * - CORS handled FIRST (including OPTIONS)
- * - Restores required endpoints used by Customer UI:
+ * - Customer endpoints:
  *    - POST /api/distance
  *    - POST /api/quote
- *    - POST /api/confirm        (alias create order)
- *    - GET  /api/schedule       (available time slots)
- *    - POST /api/schedule       (save schedule to order)
+ *    - POST /api/confirm
+ *    - GET  /api/schedule
+ *    - POST /api/schedule
  * - Delegates:
- *    - /api/orders  -> ordersController
- *    - /admin/*     -> adminRoutes
- *    - /driver/*    -> driver routes
+ *    - /api/orders
+ *    - /admin/*
+ *    - /driver/*
  */
 
 const url = require("url");
@@ -26,8 +26,7 @@ const crypto = require("crypto");
 let getDistanceMiles;
 try {
   ({ getDistanceMiles } = require("./src/lib/distanceMatrix"));
-} catch (e) {
-  // If distanceMatrix path changes, fail gracefully at runtime with a clear error
+} catch {
   getDistanceMiles = null;
 }
 
@@ -61,44 +60,38 @@ function text(res, status, message) {
 }
 
 /* ======================================================
-   CORS (MUST RUN FIRST)
+   CORS (correct credentials handling)
 ====================================================== */
 function applyCors(req, res) {
   const origin = req.headers.origin;
 
   const allowedOrigins = [
-    // env-defined (recommended)
     process.env.CUSTOMER_ORIGIN,
     process.env.ADMIN_ORIGIN,
     process.env.DRIVER_ORIGIN,
     process.env.OPS_ORIGIN,
 
-    // local dev
     "http://localhost:5173",
     "http://localhost:5174",
     "http://localhost:5175",
     "http://localhost:5176",
     "http://localhost:5177",
 
-    // prod
     "https://smilesinroute.delivery",
     "https://www.smilesinroute.delivery",
     "https://admin.smilesinroute.delivery",
-    "https://driver.smilesinroute.delivery",
+    "https://drivers.smilesinroute.delivery",
     "https://ops.smilesinroute.delivery",
   ].filter(Boolean);
 
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
   } else {
-    // If you want to lock down later, remove "*" fallback
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
-  // IMPORTANT: If you ever set Allow-Credentials true, you should not use "*".
-  // But your current system uses Bearer tokens and public endpoints; we keep this consistent.
-  res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, Stripe-Signature"
@@ -132,12 +125,12 @@ function readBody(req, limit = 1_000_000) {
 async function readJson(req) {
   const type = String(req.headers["content-type"] || "");
   if (type && !type.includes("application/json")) {
-    // allow empty (some clients omit content-type)
-    // but if provided, must be JSON
     throw new Error("Content-Type must be application/json");
   }
+
   const raw = await readBody(req);
   if (!raw) return {};
+
   try {
     return JSON.parse(raw);
   } catch {
@@ -145,18 +138,30 @@ async function readJson(req) {
   }
 }
 
-function mustNumber(v, label) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) throw new Error(`${label} must be a number`);
-  return n;
+/* ======================================================
+   Pricing logic (single source)
+====================================================== */
+function buildCourierQuote({ miles, fragile, priority, timeSensitive }) {
+  const base = 25;
+
+  const breakdown = {
+    base,
+    mileage: Number((miles * 2.25).toFixed(2)),
+    fragile: fragile ? 10 : 0,
+    priority: priority ? 15 : 0,
+    timeSensitive: timeSensitive ? 20 : 0,
+  };
+
+  const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+
+  return { breakdown, total };
 }
 
 /* ======================================================
    Scheduling helpers
 ====================================================== */
 function buildDefaultSlots() {
-  // Keep it simple + deterministic for now (matches your UI)
-  return ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00"];
+  return ["08:00","09:00","10:00","11:00","12:00","13:00","14:00","15:00","16:00","17:00"];
 }
 
 function isISODate(s) {
@@ -171,7 +176,6 @@ function isTimeHHMM(s) {
    MAIN ROUTER
 ====================================================== */
 async function handleAPI(req, res, pool) {
-  // Always apply CORS first so even errors/preflight get headers.
   applyCors(req, res);
 
   if (req.method === "OPTIONS") {
@@ -180,35 +184,25 @@ async function handleAPI(req, res, pool) {
   }
 
   const method = String(req.method || "GET").toUpperCase();
-  const rawUrl = String(req.url || "/");
-  const parsed = url.parse(rawUrl, true);
+  const parsed = url.parse(String(req.url || "/"), true);
   const pathname = parsed.pathname || "/";
   const query = parsed.query || {};
 
   try {
-    /* =========================
-       HEALTH
-    ========================= */
+    /* ================= HEALTH ================= */
     if (pathname === "/api/health" && method === "GET") {
-      try {
-        await pool.query("SELECT 1");
-        return json(res, 200, { status: "ok" });
-      } catch {
-        return json(res, 500, { status: "db_error" });
-      }
+      await pool.query("SELECT 1");
+      return json(res, 200, { status: "ok" });
     }
 
-    /* =========================
-       DISTANCE
-       POST /api/distance
-       Body: { pickup, delivery }
-    ========================= */
+    /* ================= DISTANCE ================= */
     if (pathname === "/api/distance" && method === "POST") {
       if (!getDistanceMiles) {
         return json(res, 500, { error: "Distance service not configured" });
       }
 
       const body = await readJson(req);
+
       if (!body.pickup || !body.delivery) {
         return json(res, 400, { error: "pickup and delivery required" });
       }
@@ -217,64 +211,64 @@ async function handleAPI(req, res, pool) {
       return json(res, 200, { distance_miles: miles });
     }
 
-    /* =========================
-       QUOTE
-       POST /api/quote
-       Body: { distance_miles, fragile, priority, timeSensitive, vehicle? }
-    ========================= */
+    /* ================= QUOTE ================= */
     if (pathname === "/api/quote" && method === "POST") {
       const body = await readJson(req);
-      const miles = mustNumber(body.distance_miles, "distance_miles");
 
-      // NOTE: vehicle selection is not implemented in your UI yet.
-      // This keeps backward compatibility with your existing pricing.
-      const base = 25;
+      let miles = Number(body.distance_miles);
 
-      const breakdown = {
-        base,
-        mileage: Number((miles * 2.25).toFixed(2)),
-        fragile: body.fragile ? 10 : 0,
-        priority: body.priority ? 15 : 0,
-        timeSensitive: body.timeSensitive ? 20 : 0,
-      };
+      if (!Number.isFinite(miles)) {
+        if (!getDistanceMiles) {
+          return json(res, 400, { error: "distance_miles required" });
+        }
+        if (!body.pickup_address || !body.delivery_address) {
+          return json(res, 400, {
+            error: "pickup_address and delivery_address required",
+          });
+        }
+        miles = await getDistanceMiles(
+          body.pickup_address,
+          body.delivery_address
+        );
+      }
 
-      const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+      const { breakdown, total } = buildCourierQuote({
+        miles,
+        fragile: body.fragile === true,
+        priority: body.priority === true,
+        timeSensitive: body.timeSensitive === true,
+      });
 
       return json(res, 200, {
         quote_id: crypto.randomUUID(),
+        distance_miles: miles,
         breakdown,
         total,
       });
     }
 
-    /* =========================
-       SCHEDULE (available slots)
-       GET /api/schedule?date=YYYY-MM-DD&serviceType=delivery
-       Response: { availableSlots: [...] }
-    ========================= */
+    /* ================= SCHEDULE GET ================= */
     if (pathname === "/api/schedule" && method === "GET") {
       const date = String(query.date || "");
-      // serviceType currently unused but accepted
       if (!isISODate(date)) {
         return json(res, 200, { availableSlots: [] });
       }
       return json(res, 200, { availableSlots: buildDefaultSlots() });
     }
 
-    /* =========================
-       SCHEDULE (persist selection)
-       POST /api/schedule
-       Body: { order_id, scheduled_date, scheduled_time }
-    ========================= */
+    /* ================= SCHEDULE POST ================= */
     if (pathname === "/api/schedule" && method === "POST") {
       const body = await readJson(req);
+
       const orderId = String(body.order_id || "").trim();
       const scheduledDate = String(body.scheduled_date || "").trim();
       const scheduledTime = String(body.scheduled_time || "").trim();
 
       if (!orderId) return json(res, 400, { error: "order_id is required" });
-      if (!isISODate(scheduledDate)) return json(res, 400, { error: "scheduled_date must be YYYY-MM-DD" });
-      if (!isTimeHHMM(scheduledTime)) return json(res, 400, { error: "scheduled_time must be HH:MM" });
+      if (!isISODate(scheduledDate))
+        return json(res, 400, { error: "scheduled_date invalid" });
+      if (!isTimeHHMM(scheduledTime))
+        return json(res, 400, { error: "scheduled_time invalid" });
 
       const { rows } = await pool.query(
         `UPDATE orders
@@ -289,11 +283,7 @@ async function handleAPI(req, res, pool) {
       return json(res, 200, rows[0]);
     }
 
-    /* =========================
-       CONFIRM (alias used by UI)
-       POST /api/confirm  -> creates order (same as POST /api/orders)
-       This is the endpoint your UI is hitting when Finalize is clicked.
-    ========================= */
+    /* ================= CONFIRM ================= */
     if (pathname === "/api/confirm" && method === "POST") {
       const body = await readJson(req);
 
@@ -301,9 +291,17 @@ async function handleAPI(req, res, pool) {
         return json(res, 400, { error: "customer_email is required" });
       }
 
+      const miles = Number(body.distance_miles || 0);
+
+      const { breakdown, total } = buildCourierQuote({
+        miles,
+        fragile: body.fragile === true,
+        priority: body.priority === true,
+        timeSensitive: body.timeSensitive === true,
+      });
+
       const { rows } = await pool.query(
-        `
-        INSERT INTO orders (
+        `INSERT INTO orders (
           service_type,
           customer_id,
           customer_email,
@@ -322,8 +320,7 @@ async function handleAPI(req, res, pool) {
           'confirmed_pending_payment',
           'unpaid'
         )
-        RETURNING *
-        `,
+        RETURNING *`,
         [
           body.customer_id || null,
           body.customer_email,
@@ -331,40 +328,23 @@ async function handleAPI(req, res, pool) {
           body.delivery_address || null,
           body.scheduled_date || null,
           body.scheduled_time || null,
-          body.distance_miles || 0,
-          body.total_amount || 0,
+          miles,
+          total,
         ]
       );
 
       return json(res, 201, rows[0]);
     }
 
-    /* =========================
-       PLATFORM AVAILABILITY (your existing controller)
-    ========================= */
+    /* ================= CONTROLLERS ================= */
     if (await handleAvailability(req, res, pool, pathname, method, json)) return;
-
-    /* =========================
-       ORDERS (existing controller)
-    ========================= */
     if (await handleOrders(req, res, pool, pathname, method, json)) return;
-
-    /* =========================
-       DRIVER ROUTES
-    ========================= */
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
     if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
     if (await handleDriverProof(req, res, pool, pathname, method)) return;
-
-    /* =========================
-       ADMIN ROUTES
-    ========================= */
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
 
-    /* =========================
-       ROOT
-    ========================= */
     if (pathname === "/" && method === "GET") {
       return text(res, 200, "Smiles In Route API");
     }
@@ -372,7 +352,6 @@ async function handleAPI(req, res, pool) {
     return json(res, 404, { error: "Not found" });
   } catch (err) {
     console.error("[API ROUTER ERROR]", err);
-    // CORS is already applied above, so browser will see this.
     return json(res, 500, { error: err.message || "Server error" });
   }
 }
