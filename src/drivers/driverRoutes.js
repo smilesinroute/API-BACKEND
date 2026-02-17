@@ -1,39 +1,36 @@
+"use strict";
+
 /**
  * src/drivers/driverRoutes.js
  *
- * Production-hardened Driver Routes
- * - Cloudflare Access auto-login (header-based)
- * - Manual email/password login (bcrypt + legacy fallback)
- * - JWT session tokens
- * - Driver orders fetching (Bearer token)
+ * Driver Routes (Production) — Cloudflare Only
+ * --------------------------------------------
+ * ✅ Cloudflare Access identity header is the ONLY auth source
+ * ✅ No passwords, no JWT, no sessions
+ * ✅ Enforces selfie requirement after "login"
+ * ✅ Fetches assigned orders for the driver
+ * ✅ Detects DB columns at runtime to avoid guessing (email column, etc.)
  *
- * Requires:
- *   npm install bcrypt jsonwebtoken
+ * Endpoints:
+ *   GET  /api/driver/me
+ *   GET  /api/driver/orders
  *
- * ENV:
- *   JWT_SECRET=strong_secret_here
- *   DRIVER_JWT_EXPIRES_IN=12h (optional)
+ * Required Cloudflare header:
+ *   cf-access-authenticated-user-email  (or x-cf-access-authenticated-user-email)
+ *
+ * Notes:
+ * - If drivers.email does NOT exist, this will return a clear error telling you what to add.
+ * - Selfie upload is handled elsewhere (your existing selfie route). This file only ENFORCES it.
  */
 
-"use strict";
-
 const url = require("url");
-const jwt = require("jsonwebtoken");
-const bcrypt = require("bcrypt");
-
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  throw new Error("Missing required env: JWT_SECRET");
-}
-
-const JWT_EXPIRES_IN = process.env.DRIVER_JWT_EXPIRES_IN || "12h";
 
 /* --------------------------------------------------
-   Helpers
+   Response helpers
 -------------------------------------------------- */
 
 function sendJSON(res, status, data) {
-  if (res.headersSent) return;
+  if (res.writableEnded) return;
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(data));
@@ -43,214 +40,190 @@ function normalizeEmail(v) {
   return String(v || "").trim().toLowerCase();
 }
 
-function createDriverToken(driver) {
-  return jwt.sign(
-    {
-      id: driver.id,
-      email: driver.email,
-      role: "driver",
-    },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
-  );
-}
-
-function readRequestBody(req, { maxBytes = 1024 * 64 } = {}) {
-  return new Promise((resolve) => {
-    let body = "";
-    let bytes = 0;
-    let done = false;
-
-    req.on("data", (chunk) => {
-      if (done) return;
-      bytes += chunk.length;
-
-      if (bytes > maxBytes) {
-        done = true;
-        try {
-          req.destroy();
-        } catch {}
-        return resolve({ __tooLarge: true });
-      }
-
-      body += chunk.toString("utf8");
-    });
-
-    req.on("end", () => {
-      if (done) return;
-      if (!body) return resolve({});
-      try {
-        resolve(JSON.parse(body));
-      } catch {
-        resolve({ __invalidJson: true });
-      }
-    });
-
-    req.on("error", () => resolve({ __readError: true }));
-  });
-}
-
 function getCloudflareEmail(req) {
+  // Cloudflare Access commonly uses one of these
   const v =
     req.headers["cf-access-authenticated-user-email"] ||
     req.headers["x-cf-access-authenticated-user-email"];
   return normalizeEmail(v);
 }
 
-function extractDriverFromToken(req) {
-  const auth = String(req.headers.authorization || "");
+/* --------------------------------------------------
+   Schema detection (prevents guessing)
+-------------------------------------------------- */
 
-  if (!auth.toLowerCase().startsWith("bearer ")) {
-    return { error: "Missing Authorization token" };
-  }
+let _schemaCache = null;
 
-  const token = auth.slice(7).trim();
-  if (!token) return { error: "Missing Authorization token" };
+async function loadSchema(db) {
+  if (_schemaCache) return _schemaCache;
 
-  try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    return { payload };
-  } catch {
-    return { error: "Invalid token" };
-  }
+  // Keep queries small + compatible with Postgres
+  const [driversCols, ordersCols] = await Promise.all([
+    db.query(
+      `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'drivers'
+      `
+    ),
+    db.query(
+      `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'orders'
+      `
+    ),
+  ]);
+
+  const drivers = new Set((driversCols.rows || []).map((r) => r.column_name));
+  const orders = new Set((ordersCols.rows || []).map((r) => r.column_name));
+
+  _schemaCache = { drivers, orders };
+  return _schemaCache;
 }
 
 /* --------------------------------------------------
-   DB helpers
+   Driver lookup (Cloudflare email -> driver row)
 -------------------------------------------------- */
 
-async function findDriverByEmail(db, email) {
+async function findDriverByCloudflareEmail(db, cfEmail) {
+  const schema = await loadSchema(db);
+
+  // We do NOT guess. If there's no email column, we fail clearly.
+  if (!schema.drivers.has("email")) {
+    return {
+      error:
+        "drivers.email column is missing. Add an email column to drivers so Cloudflare email can map to a driver record.",
+      status: 500,
+    };
+  }
+
   const { rows } = await db.query(
     `
-    SELECT id, email, password, active, status
+    SELECT *
     FROM drivers
     WHERE lower(email) = lower($1)
     LIMIT 1
     `,
-    [email]
+    [cfEmail]
   );
-  return rows[0] || null;
+
+  const driver = rows[0] || null;
+  if (!driver) return { error: "Driver not found", status: 403 };
+
+  // Optional safety checks if columns exist
+  if (schema.drivers.has("active") && driver.active === false) {
+    return { error: "Driver inactive", status: 403 };
+  }
+  if (schema.drivers.has("status") && String(driver.status || "") === "inactive") {
+    return { error: "Driver inactive", status: 403 };
+  }
+
+  return { driver };
+}
+
+function selfieIsRequired(driver) {
+  // If your schema has selfie_verified, enforce it. If it doesn't, don't block.
+  // (But your earlier output shows selfie_verified exists.)
+  if (typeof driver.selfie_verified === "boolean") {
+    return driver.selfie_verified !== true;
+  }
+  return false;
 }
 
 /* --------------------------------------------------
    Route Handlers
 -------------------------------------------------- */
 
-async function handleDriverLogin(req, res, db) {
-  try {
-    const cfEmail = getCloudflareEmail(req);
-
-    // Cloudflare Access auto-login
-    if (cfEmail) {
-      const driver = await findDriverByEmail(db, cfEmail);
-
-      if (!driver || driver.active === false || driver.status === "inactive") {
-        return sendJSON(res, 403, { error: "Driver not authorized" });
-      }
-
-      const token = createDriverToken({
-        id: driver.id,
-        email: driver.email,
-      });
-
-      return sendJSON(res, 200, {
-        ok: true,
-        token,
-        driver: {
-          id: driver.id,
-          email: driver.email,
-        },
-      });
-    }
-
-    // Manual login fallback
-    const body = await readRequestBody(req);
-
-    if (body.__tooLarge) {
-      return sendJSON(res, 413, { error: "Request body too large" });
-    }
-    if (body.__invalidJson) {
-      return sendJSON(res, 400, { error: "Invalid JSON body" });
-    }
-
-    const email = normalizeEmail(body.email);
-    const password = String(body.password || "");
-
-    if (!email || !password) {
-      return sendJSON(res, 400, { error: "Email and password required" });
-    }
-
-    const driver = await findDriverByEmail(db, email);
-
-    // Do not reveal whether email exists
-    if (!driver || driver.active === false || driver.status === "inactive") {
-      return sendJSON(res, 401, { error: "Invalid credentials" });
-    }
-
-    const stored = String(driver.password || "");
-    let ok = false;
-
-    if (stored.startsWith("$2")) {
-      // bcrypt hash
-      ok = await bcrypt.compare(password, stored);
-    } else {
-      // legacy plaintext fallback
-      ok = password === stored;
-    }
-
-    if (!ok) {
-      return sendJSON(res, 401, { error: "Invalid credentials" });
-    }
-
-    const token = createDriverToken({
-      id: driver.id,
-      email: driver.email,
+async function handleDriverMe(req, res, db) {
+  const cfEmail = getCloudflareEmail(req);
+  if (!cfEmail) {
+    return sendJSON(res, 401, {
+      error: "Missing Cloudflare identity header",
+      hint: "Driver must access via Cloudflare-protected domain",
     });
-
-    return sendJSON(res, 200, {
-      ok: true,
-      token,
-      driver: {
-        id: driver.id,
-        email: driver.email,
-      },
-    });
-  } catch (err) {
-    console.error("[DRIVER LOGIN ERROR]", err);
-    return sendJSON(res, 500, { error: "Login failed" });
   }
+
+  const found = await findDriverByCloudflareEmail(db, cfEmail);
+  if (found.error) return sendJSON(res, found.status || 403, { error: found.error });
+
+  const driver = found.driver;
+
+  return sendJSON(res, 200, {
+    ok: true,
+    driver: {
+      id: driver.id,
+      name: driver.name ?? null,
+      email: driver.email ?? null,
+      selfie_verified:
+        typeof driver.selfie_verified === "boolean" ? driver.selfie_verified : null,
+      selfie_image_url: driver.selfie_image_url ?? null,
+      last_selfie_at: driver.last_selfie_at ?? null,
+    },
+    selfie_required: selfieIsRequired(driver),
+  });
 }
 
 async function handleDriverOrders(req, res, db) {
-  try {
-    const { payload, error } = extractDriverFromToken(req);
-
-    if (!payload) {
-      return sendJSON(res, 401, { error: error || "Unauthorized" });
-    }
-
-    if (!payload.id || payload.role !== "driver") {
-      return sendJSON(res, 403, { error: "Forbidden" });
-    }
-
-    const { rows } = await db.query(
-      `
-      SELECT id, customer, address, status, service_type
-      FROM orders
-      WHERE driver_id = $1
-      ORDER BY id DESC
-      `,
-      [payload.id]
-    );
-
-    return sendJSON(res, 200, {
-      ok: true,
-      orders: rows,
+  const cfEmail = getCloudflareEmail(req);
+  if (!cfEmail) {
+    return sendJSON(res, 401, {
+      error: "Missing Cloudflare identity header",
+      hint: "Driver must access via Cloudflare-protected domain",
     });
-  } catch (err) {
-    console.error("[DRIVER ORDERS ERROR]", err);
-    return sendJSON(res, 500, { error: "Failed to fetch driver orders" });
   }
+
+  const found = await findDriverByCloudflareEmail(db, cfEmail);
+  if (found.error) return sendJSON(res, found.status || 403, { error: found.error });
+
+  const driver = found.driver;
+
+  // Enforce selfie AFTER login
+  if (selfieIsRequired(driver)) {
+    return sendJSON(res, 403, {
+      error: "Selfie required",
+      selfie_required: true,
+    });
+  }
+
+  const schema = await loadSchema(db);
+
+  // Ensure the orders table supports assignment
+  if (!schema.orders.has("assigned_driver_id")) {
+    return sendJSON(res, 500, {
+      error:
+        "orders.assigned_driver_id column is missing. Driver assignments cannot work without it.",
+    });
+  }
+
+  // Return assigned + active orders for this driver
+  // (Keep status list aligned with your workflow)
+  const { rows } = await db.query(
+    `
+    SELECT
+      id,
+      service_type,
+      status,
+      pickup_address,
+      delivery_address,
+      scheduled_date,
+      scheduled_time,
+      distance_miles,
+      total_amount,
+      payment_status,
+      created_at,
+      assigned_at,
+      picked_up_at,
+      delivered_at
+    FROM orders
+    WHERE assigned_driver_id = $1
+      AND status IN ('assigned', 'in_progress', 'ready_for_dispatch')
+    ORDER BY created_at ASC
+    `,
+    [driver.id]
+  );
+
+  return sendJSON(res, 200, { ok: true, orders: rows });
 }
 
 /* --------------------------------------------------
@@ -259,14 +232,16 @@ async function handleDriverOrders(req, res, db) {
 
 async function handleDriverRoutes(req, res, db) {
   const parsed = url.parse(req.url, true);
-  const pathname = parsed.pathname;
-  const method = req.method;
+  const pathname = parsed.pathname || "/";
+  const method = String(req.method || "GET").toUpperCase();
 
-  if (pathname === "/api/driver/login" && method === "POST") {
-    await handleDriverLogin(req, res, db);
+  // Driver profile / selfie requirement check
+  if (pathname === "/api/driver/me" && method === "GET") {
+    await handleDriverMe(req, res, db);
     return true;
   }
 
+  // Driver assigned orders
   if (pathname === "/api/driver/orders" && method === "GET") {
     await handleDriverOrders(req, res, db);
     return true;
