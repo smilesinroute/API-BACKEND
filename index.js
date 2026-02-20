@@ -1,12 +1,13 @@
 "use strict";
 
 /**
- * Smiles In Route — Core API Router (Production Clean)
- * =====================================================
+ * Smiles In Route — Core API Router (Clean Token-Based)
+ * ======================================================
  * - Plain Node.js (NO Express)
  * - Strict credential-safe CORS
  * - OPTIONS handled globally
  * - Clean route delegation
+ * - NO Cloudflare identity dependency
  */
 
 const url = require("url");
@@ -19,7 +20,6 @@ const { handleOrders } = require("./src/controllers/ordersController");
 const { handleAvailability } = require("./src/controllers/availabilityController");
 const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 
-const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
 const { handleDriverOrders } = require("./src/drivers/driverOrders");
 const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
@@ -42,7 +42,7 @@ function text(res, status, message) {
 }
 
 /* ======================================================
-   STRICT CORS (CREDENTIAL SAFE)
+   STRICT CORS (Credential Safe)
 ====================================================== */
 const ALLOWED_ORIGINS = new Set([
   "https://smilesinroute.delivery",
@@ -144,7 +144,6 @@ async function handleAPI(req, res, pool) {
   const method = String(req.method || "GET").toUpperCase();
   const parsed = url.parse(String(req.url || "/"), true);
   const pathname = parsed.pathname || "/";
-  const query = parsed.query || {};
 
   try {
     /* ================= HEALTH ================= */
@@ -176,7 +175,7 @@ async function handleAPI(req, res, pool) {
       }
 
       const miles = Number(body.distance_miles || 0);
-      const { breakdown, total } = buildCourierQuote({ miles });
+      const { total } = buildCourierQuote({ miles });
 
       const { rows } = await pool.query(
         `INSERT INTO orders (
@@ -211,10 +210,12 @@ async function handleAPI(req, res, pool) {
     /* ================= CONTROLLER DELEGATION ================= */
     if (await handleAvailability(req, res, pool, pathname, method, json)) return;
     if (await handleOrders(req, res, pool, pathname, method, json)) return;
-    if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
+
+    // Driver system (Token-based only)
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
     if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
     if (await handleDriverProof(req, res, pool, pathname, method)) return;
+
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
 
     if (pathname === "/" && method === "GET") {
