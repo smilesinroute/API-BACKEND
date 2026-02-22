@@ -1,12 +1,12 @@
 "use strict";
 
 /**
- * Smiles In Route — Core API Router (Production Clean)
- * =====================================================
- * - Plain Node.js (NO Express)
+ * Smiles In Route — Core API Router
+ * ==================================
+ * - Plain Node.js HTTP (NO Express)
  * - Strict credential-safe CORS
- * - OPTIONS handled globally
- * - Clean route delegation
+ * - Token-based driver auth
+ * - Clean controller delegation
  */
 
 const url = require("url");
@@ -19,6 +19,7 @@ const { handleOrders } = require("./src/controllers/ordersController");
 const { handleAvailability } = require("./src/controllers/availabilityController");
 const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 
+const { handleDriverLogin } = require("./src/drivers/driverLogin");
 const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
 const { handleDriverOrders } = require("./src/drivers/driverOrders");
 const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
@@ -42,7 +43,7 @@ function text(res, status, message) {
 }
 
 /* ======================================================
-   STRICT CORS (CREDENTIAL SAFE)
+   STRICT CORS
 ====================================================== */
 const ALLOWED_ORIGINS = new Set([
   "https://smilesinroute.delivery",
@@ -144,9 +145,9 @@ async function handleAPI(req, res, pool) {
   const method = String(req.method || "GET").toUpperCase();
   const parsed = url.parse(String(req.url || "/"), true);
   const pathname = parsed.pathname || "/";
-  const query = parsed.query || {};
 
   try {
+
     /* ================= HEALTH ================= */
     if (pathname === "/api/health" && method === "GET") {
       await pool.query("SELECT 1");
@@ -176,7 +177,7 @@ async function handleAPI(req, res, pool) {
       }
 
       const miles = Number(body.distance_miles || 0);
-      const { breakdown, total } = buildCourierQuote({ miles });
+      const { total } = buildCourierQuote({ miles });
 
       const { rows } = await pool.query(
         `INSERT INTO orders (
@@ -208,14 +209,21 @@ async function handleAPI(req, res, pool) {
       return json(res, 201, rows[0]);
     }
 
-    /* ================= CONTROLLER DELEGATION ================= */
-    if (await handleAvailability(req, res, pool, pathname, method, json)) return;
-    if (await handleOrders(req, res, pool, pathname, method, json)) return;
+    /* ================= DRIVER LOGIN ================= */
+    if (await handleDriverLogin(req, res, pool)) return;
+
+    /* ================= DRIVER ROUTES ================= */
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
     if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
     if (await handleDriverProof(req, res, pool, pathname, method)) return;
+
+    /* ================= ADMIN ================= */
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
+
+    /* ================= PUBLIC ORDERS ================= */
+    if (await handleAvailability(req, res, pool, pathname, method, json)) return;
+    if (await handleOrders(req, res, pool, pathname, method, json)) return;
 
     if (pathname === "/" && method === "GET") {
       return text(res, 200, "Smiles In Route API");

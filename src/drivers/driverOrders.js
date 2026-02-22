@@ -2,46 +2,37 @@
 
 const { json, requireDriver } = require("../lib/driverAuth");
 
-function asId(v) {
-  return String(v || "").trim();
-}
+/* ======================================================
+   HELPERS
+====================================================== */
 
-/**
- * =====================================================
- * DRIVER ORDER LIFECYCLE ROUTES
- * =====================================================
- *
- * GET  /api/driver/orders
- * POST /api/driver/order/:id/accept
- * POST /api/driver/order/:id/pickup-photo
- * POST /api/driver/order/:id/start
- * POST /api/driver/order/:id/delivery-photo
- * POST /api/driver/order/:id/complete
- * POST /api/driver/location
- *
- * CRITICAL:
- * requireDriver() may already send the response on auth failure.
- * If that happens, we MUST NOT send another response (prevents headers-sent crash).
- */
+function extractOrderId(pathname) {
+  const parts = pathname.split("/");
+  return parts.length >= 5 ? String(parts[4]).trim() : null;
+}
 
 async function getSession(pool, req, res, opts) {
   try {
     return await requireDriver(pool, req, opts);
-  } catch (e) {
-    // requireDriver already responded (401), so we stop here safely.
+  } catch (err) {
     if (!res.writableEnded) {
-      // fallback safety (only if requireDriver didn't respond for some reason)
-      json(res, 401, { error: e.message || "Unauthorized" });
+      json(res, 401, { ok: false, error: err.message || "Unauthorized" });
     }
     return null;
   }
 }
 
+/* ======================================================
+   DRIVER ORDER ROUTES
+====================================================== */
+
 async function handleDriverOrders(req, res, pool, pathname, method) {
-  /* =====================================================
+
+  /* ======================================================
      GET /api/driver/orders
-  ===================================================== */
+  ====================================================== */
   if (pathname === "/api/driver/orders" && method === "GET") {
+
     const session = await getSession(pool, req, res, { requireSelfie: true });
     if (!session) return true;
 
@@ -55,7 +46,8 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           pickup_address,
           delivery_address,
           scheduled_date,
-          scheduled_time
+          scheduled_time,
+          created_at
         FROM orders
         WHERE
           (
@@ -73,27 +65,29 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
 
       json(res, 200, { ok: true, orders: rows });
       return true;
-    } catch (e) {
-      console.error("[DRIVER ORDERS] list error:", e);
-      json(res, 500, { error: "Server error" });
+
+    } catch (err) {
+      console.error("[DRIVER] list error:", err);
+      json(res, 500, { ok: false, error: "Server error" });
       return true;
     }
   }
 
-  /* =====================================================
+  /* ======================================================
      POST /api/driver/order/:id/accept
-  ===================================================== */
+  ====================================================== */
   if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/accept") && method === "POST") {
+
     const session = await getSession(pool, req, res, { requireSelfie: true });
     if (!session) return true;
 
-    try {
-      const orderId = asId(pathname.split("/")[4]);
-      if (!orderId) {
-        json(res, 400, { error: "order_id missing" });
-        return true;
-      }
+    const orderId = extractOrderId(pathname);
+    if (!orderId) {
+      json(res, 400, { ok: false, error: "order_id missing" });
+      return true;
+    }
 
+    try {
       const { rowCount } = await pool.query(
         `
         UPDATE orders
@@ -109,69 +103,35 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       );
 
       if (!rowCount) {
-        json(res, 400, { error: "Order not available" });
+        json(res, 400, { ok: false, error: "Order not available" });
         return true;
       }
 
       json(res, 200, { ok: true, order_id: orderId, status: "assigned" });
       return true;
-    } catch (e) {
-      console.error("[DRIVER ORDERS] accept error:", e);
-      json(res, 500, { error: "Server error" });
+
+    } catch (err) {
+      console.error("[DRIVER] accept error:", err);
+      json(res, 500, { ok: false, error: "Server error" });
       return true;
     }
   }
 
-  /* =====================================================
-     POST /api/driver/order/:id/pickup-photo
-  ===================================================== */
-  if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/pickup-photo") && method === "POST") {
-    const session = await getSession(pool, req, res, { requireSelfie: true });
-    if (!session) return true;
-
-    try {
-      const orderId = asId(pathname.split("/")[4]);
-      if (!orderId) {
-        json(res, 400, { error: "order_id missing" });
-        return true;
-      }
-
-      await pool.query(
-        `
-        UPDATE orders
-        SET
-          pickup_photo_taken = true,
-          pickup_photo_at = NOW()
-        WHERE id = $1
-          AND assigned_driver_id = $2
-        `,
-        [orderId, session.driver_id]
-      );
-
-      json(res, 200, { ok: true, order_id: orderId });
-      return true;
-    } catch (e) {
-      console.error("[DRIVER ORDERS] pickup-photo error:", e);
-      json(res, 500, { error: "Server error" });
-      return true;
-    }
-  }
-
-  /* =====================================================
+  /* ======================================================
      POST /api/driver/order/:id/start
-     Requires pickup photo
-  ===================================================== */
+  ====================================================== */
   if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/start") && method === "POST") {
+
     const session = await getSession(pool, req, res, { requireSelfie: true });
     if (!session) return true;
 
-    try {
-      const orderId = asId(pathname.split("/")[4]);
-      if (!orderId) {
-        json(res, 400, { error: "order_id missing" });
-        return true;
-      }
+    const orderId = extractOrderId(pathname);
+    if (!orderId) {
+      json(res, 400, { ok: false, error: "order_id missing" });
+      return true;
+    }
 
+    try {
       const { rowCount } = await pool.query(
         `
         UPDATE orders
@@ -181,75 +141,40 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         WHERE id = $1
           AND assigned_driver_id = $2
           AND status = 'assigned'
-          AND pickup_photo_taken = true
         `,
         [orderId, session.driver_id]
       );
 
       if (!rowCount) {
-        json(res, 400, { error: "Pickup photo required" });
+        json(res, 400, { ok: false, error: "Order not ready to start" });
         return true;
       }
 
       json(res, 200, { ok: true, order_id: orderId, status: "en_route" });
       return true;
-    } catch (e) {
-      console.error("[DRIVER ORDERS] start error:", e);
-      json(res, 500, { error: "Server error" });
+
+    } catch (err) {
+      console.error("[DRIVER] start error:", err);
+      json(res, 500, { ok: false, error: "Server error" });
       return true;
     }
   }
 
-  /* =====================================================
-     POST /api/driver/order/:id/delivery-photo
-  ===================================================== */
-  if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/delivery-photo") && method === "POST") {
-    const session = await getSession(pool, req, res, { requireSelfie: true });
-    if (!session) return true;
-
-    try {
-      const orderId = asId(pathname.split("/")[4]);
-      if (!orderId) {
-        json(res, 400, { error: "order_id missing" });
-        return true;
-      }
-
-      await pool.query(
-        `
-        UPDATE orders
-        SET
-          delivery_photo_taken = true,
-          delivery_photo_at = NOW()
-        WHERE id = $1
-          AND assigned_driver_id = $2
-        `,
-        [orderId, session.driver_id]
-      );
-
-      json(res, 200, { ok: true, order_id: orderId });
-      return true;
-    } catch (e) {
-      console.error("[DRIVER ORDERS] delivery-photo error:", e);
-      json(res, 500, { error: "Server error" });
-      return true;
-    }
-  }
-
-  /* =====================================================
+  /* ======================================================
      POST /api/driver/order/:id/complete
-     Requires delivery photo
-  ===================================================== */
+  ====================================================== */
   if (pathname.startsWith("/api/driver/order/") && pathname.endsWith("/complete") && method === "POST") {
+
     const session = await getSession(pool, req, res, { requireSelfie: true });
     if (!session) return true;
 
-    try {
-      const orderId = asId(pathname.split("/")[4]);
-      if (!orderId) {
-        json(res, 400, { error: "order_id missing" });
-        return true;
-      }
+    const orderId = extractOrderId(pathname);
+    if (!orderId) {
+      json(res, 400, { ok: false, error: "order_id missing" });
+      return true;
+    }
 
+    try {
       const { rowCount } = await pool.query(
         `
         UPDATE orders
@@ -259,29 +184,30 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         WHERE id = $1
           AND assigned_driver_id = $2
           AND status = 'en_route'
-          AND delivery_photo_taken = true
         `,
         [orderId, session.driver_id]
       );
 
       if (!rowCount) {
-        json(res, 400, { error: "Delivery photo required" });
+        json(res, 400, { ok: false, error: "Order not in progress" });
         return true;
       }
 
       json(res, 200, { ok: true, order_id: orderId, status: "completed" });
       return true;
-    } catch (e) {
-      console.error("[DRIVER ORDERS] complete error:", e);
-      json(res, 500, { error: "Server error" });
+
+    } catch (err) {
+      console.error("[DRIVER] complete error:", err);
+      json(res, 500, { ok: false, error: "Server error" });
       return true;
     }
   }
 
-  /* =====================================================
+  /* ======================================================
      POST /api/driver/location
-  ===================================================== */
+  ====================================================== */
   if (pathname === "/api/driver/location" && method === "POST") {
+
     const session = await getSession(pool, req, res, { requireSelfie: true });
     if (!session) return true;
 
@@ -293,7 +219,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       try {
         data = JSON.parse(body || "{}");
       } catch {
-        json(res, 400, { error: "Invalid JSON body" });
+        json(res, 400, { ok: false, error: "Invalid JSON body" });
         return true;
       }
 
@@ -301,7 +227,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
       const lng = Number(data.lng);
 
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-        json(res, 400, { error: "lat and lng must be numbers" });
+        json(res, 400, { ok: false, error: "lat and lng must be numbers" });
         return true;
       }
 
@@ -320,9 +246,10 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
 
       json(res, 200, { ok: true });
       return true;
-    } catch (e) {
-      console.error("[DRIVER ORDERS] location error:", e);
-      json(res, 500, { error: "Server error" });
+
+    } catch (err) {
+      console.error("[DRIVER] location error:", err);
+      json(res, 500, { ok: false, error: "Server error" });
       return true;
     }
   }
