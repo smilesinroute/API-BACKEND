@@ -1,4 +1,3 @@
-
 "use strict";
 
 const express = require("express");
@@ -7,14 +6,14 @@ const pool = require("../utils/db");
 
 /* ======================================================
    DRIVER AUTH MIDDLEWARE
-   - Replace with real JWT/session verification later
-   - For now: token value = driver ID
+   TEMP: token = driver ID
 ====================================================== */
 function requireDriver(req, res, next) {
   const header = String(req.headers.authorization || "");
 
   if (!header.toLowerCase().startsWith("bearer ")) {
     return res.status(401).json({
+      ok: false,
       error: "Missing Authorization token",
     });
   }
@@ -23,11 +22,11 @@ function requireDriver(req, res, next) {
 
   if (!token) {
     return res.status(401).json({
+      ok: false,
       error: "Invalid Authorization token",
     });
   }
 
-  // TODO: replace with real token decoding
   req.driverId = token;
   next();
 }
@@ -40,6 +39,7 @@ router.use(requireDriver);
 function serverError(res, err, label) {
   console.error(`[DRIVER] ${label}:`, err);
   return res.status(500).json({
+    ok: false,
     error: "Internal server error",
   });
 }
@@ -47,8 +47,8 @@ function serverError(res, err, label) {
 /* ======================================================
    GET /api/driver/orders
    - Returns:
-     • paid orders available for assignment
-     • orders already assigned to driver
+     • Orders assigned to this driver
+     • Orders ready for dispatch (paid + unassigned)
 ====================================================== */
 router.get("/orders", async (req, res) => {
   const driverId = req.driverId;
@@ -59,8 +59,16 @@ router.get("/orders", async (req, res) => {
       SELECT *
       FROM orders
       WHERE
-        status = 'paid'
-        OR assigned_driver_id = $1
+        (
+          assigned_driver_id = $1
+          AND status IN ('assigned', 'en_route')
+        )
+        OR
+        (
+          assigned_driver_id IS NULL
+          AND payment_status = 'paid'
+          AND status = 'ready_for_dispatch'
+        )
       ORDER BY created_at ASC
       `,
       [driverId]
@@ -77,7 +85,6 @@ router.get("/orders", async (req, res) => {
 
 /* ======================================================
    POST /api/driver/orders/:id/accept
-   - Driver accepts a paid order
 ====================================================== */
 router.post("/orders/:id/accept", async (req, res) => {
   const driverId = req.driverId;
@@ -93,7 +100,9 @@ router.post("/orders/:id/accept", async (req, res) => {
         assigned_at = NOW()
       WHERE
         id = $2
-        AND status = 'paid'
+        AND status = 'ready_for_dispatch'
+        AND payment_status = 'paid'
+        AND assigned_driver_id IS NULL
       RETURNING *
       `,
       [driverId, orderId]
@@ -101,21 +110,25 @@ router.post("/orders/:id/accept", async (req, res) => {
 
     if (!rows.length) {
       return res.status(409).json({
+        ok: false,
         error: "Order not available for assignment",
       });
     }
 
-    return res.json(rows[0]);
+    return res.json({
+      ok: true,
+      order: rows[0],
+    });
   } catch (err) {
     return serverError(res, err, "accept order");
   }
 });
 
 /* ======================================================
-   POST /api/driver/orders/:id/pickup
-   - Driver confirms pickup
+   POST /api/driver/orders/:id/start
+   (Driver begins route)
 ====================================================== */
-router.post("/orders/:id/pickup", async (req, res) => {
+router.post("/orders/:id/start", async (req, res) => {
   const driverId = req.driverId;
   const orderId = req.params.id;
 
@@ -124,8 +137,8 @@ router.post("/orders/:id/pickup", async (req, res) => {
       `
       UPDATE orders
       SET
-        status = 'in_progress',
-        picked_up_at = NOW()
+        status = 'en_route',
+        pickup_at = NOW()
       WHERE
         id = $1
         AND assigned_driver_id = $2
@@ -137,21 +150,24 @@ router.post("/orders/:id/pickup", async (req, res) => {
 
     if (!rows.length) {
       return res.status(409).json({
+        ok: false,
         error: "Order not assigned or invalid state",
       });
     }
 
-    return res.json(rows[0]);
+    return res.json({
+      ok: true,
+      order: rows[0],
+    });
   } catch (err) {
-    return serverError(res, err, "pickup");
+    return serverError(res, err, "start order");
   }
 });
 
 /* ======================================================
-   POST /api/driver/orders/:id/delivered
-   - Driver confirms delivery
+   POST /api/driver/orders/:id/complete
 ====================================================== */
-router.post("/orders/:id/delivered", async (req, res) => {
+router.post("/orders/:id/complete", async (req, res) => {
   const driverId = req.driverId;
   const orderId = req.params.id;
 
@@ -165,7 +181,7 @@ router.post("/orders/:id/delivered", async (req, res) => {
       WHERE
         id = $1
         AND assigned_driver_id = $2
-        AND status = 'in_progress'
+        AND status = 'en_route'
       RETURNING *
       `,
       [orderId, driverId]
@@ -173,13 +189,17 @@ router.post("/orders/:id/delivered", async (req, res) => {
 
     if (!rows.length) {
       return res.status(409).json({
-        error: "Order not in progress or not assigned",
+        ok: false,
+        error: "Order not in transit or not assigned",
       });
     }
 
-    return res.json(rows[0]);
+    return res.json({
+      ok: true,
+      order: rows[0],
+    });
   } catch (err) {
-    return serverError(res, err, "delivered");
+    return serverError(res, err, "complete order");
   }
 });
 
