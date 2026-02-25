@@ -6,7 +6,7 @@
  * - Plain Node.js HTTP (NO Express)
  * - Strict credential-safe CORS
  * - Token-based driver auth
- * - Clean controller delegation
+ * - Courier + Notary unified under orders table
  */
 
 const url = require("url");
@@ -96,7 +96,10 @@ function readBody(req, limit = 1_000_000) {
       chunks.push(chunk);
     });
 
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () =>
+      resolve(Buffer.concat(chunks).toString("utf8"))
+    );
+
     req.on("error", reject);
   });
 }
@@ -118,7 +121,7 @@ async function readJson(req) {
 }
 
 /* ======================================================
-   SIMPLE QUOTE BUILDER
+   QUOTE BUILDER
 ====================================================== */
 function buildCourierQuote({ miles }) {
   const base = 25;
@@ -154,7 +157,7 @@ async function handleAPI(req, res, pool) {
       return json(res, 200, { status: "ok" });
     }
 
-    /* ================= QUOTE ================= */
+    /* ================= COURIER QUOTE ================= */
     if (pathname === "/api/quote" && method === "POST") {
       const body = await readJson(req);
       const { breakdown, total } = buildCourierQuote({
@@ -168,7 +171,7 @@ async function handleAPI(req, res, pool) {
       });
     }
 
-    /* ================= CONFIRM ================= */
+    /* ================= COURIER CONFIRM ================= */
     if (pathname === "/api/confirm" && method === "POST") {
       const body = await readJson(req);
 
@@ -209,6 +212,48 @@ async function handleAPI(req, res, pool) {
       return json(res, 201, rows[0]);
     }
 
+    /* ================= NOTARY REQUEST ================= */
+    if (pathname === "/api/notary/request" && method === "POST") {
+      const body = await readJson(req);
+
+      if (!body.customer_email || !body.customer_name) {
+        return json(res, 400, {
+          error: "customer_name and customer_email are required",
+        });
+      }
+
+      const { rows } = await pool.query(
+        `INSERT INTO orders (
+          service_type,
+          customer_email,
+          customer_name,
+          pickup_address,
+          notes,
+          scheduled_date,
+          scheduled_time,
+          status,
+          payment_status
+        )
+        VALUES (
+          'notary',
+          $1,$2,$3,$4,$5,$6,
+          'confirmed_pending_payment',
+          'unpaid'
+        )
+        RETURNING *`,
+        [
+          body.customer_email,
+          body.customer_name,
+          body.address || null,
+          body.notes || null,
+          body.scheduled_date || null,
+          body.scheduled_time || null,
+        ]
+      );
+
+      return json(res, 201, rows[0]);
+    }
+
     /* ================= DRIVER LOGIN ================= */
     if (await handleDriverLogin(req, res, pool)) return;
 
@@ -221,7 +266,7 @@ async function handleAPI(req, res, pool) {
     /* ================= ADMIN ================= */
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
 
-    /* ================= PUBLIC ORDERS ================= */
+    /* ================= PUBLIC ================= */
     if (await handleAvailability(req, res, pool, pathname, method, json)) return;
     if (await handleOrders(req, res, pool, pathname, method, json)) return;
 
