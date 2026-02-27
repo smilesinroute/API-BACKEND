@@ -1,26 +1,23 @@
 "use strict";
 
 /**
- * Orders Controller (Production)
- * ------------------------------
- * Exposes /api/orders via the Node router
+ * Orders Controller (Unified Production)
+ * ---------------------------------------
+ * Exposes /api/orders via Node router
  * Handles:
- *  - Order creation
- *  - Retrieval
- *  - Manual payment (admin / ops)
- *  - Locked status transitions (state machine)
+ *   - Order creation (courier + notary)
+ *   - Retrieval
+ *   - Locked status transitions (admin / ops)
+ *   - Manual payment override
  *
- * NOTE:
- * - Auth / role enforcement happens at a higher layer
- * - Stripe webhook handles automatic payments
+ * Stripe webhook handles automatic payment confirmation.
  */
 
 /* ======================================================
    ORDER STATUS STATE MACHINE
 ====================================================== */
 const ORDER_TRANSITIONS = {
-  new: ["confirmed_pending_payment", "rejected"],
-  confirmed_pending_payment: ["approved_pending_payment", "rejected"],
+  pending_admin_review: ["approved_pending_payment", "rejected"],
   approved_pending_payment: ["paid", "rejected"],
   paid: ["ready_for_dispatch"],
   ready_for_dispatch: ["in_progress"],
@@ -80,7 +77,7 @@ async function handleOrders(req, res, pool, pathname, method, json) {
 
   /* ======================================================
      POST /api/orders
-     Customer creates order
+     Customer creates courier OR notary order
   ====================================================== */
   if (method === "POST" && parts.length === 2) {
     const body = await readJson(req);
@@ -92,6 +89,12 @@ async function handleOrders(req, res, pool, pathname, method, json) {
     if (!isValidEmail(email)) {
       return json(res, 400, {
         error: "Valid customer_email is required",
+      });
+    }
+
+    if (!body.service_type) {
+      return json(res, 400, {
+        error: "service_type is required",
       });
     }
 
@@ -109,18 +112,19 @@ async function handleOrders(req, res, pool, pathname, method, json) {
         scheduled_time,
         distance_miles,
         total_amount,
+        notes,
         status,
         payment_status
       )
       VALUES (
-        'courier',
-        $1,$2,$3,$4,$5,$6,$7,$8,
-        'confirmed_pending_payment',
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+        'pending_admin_review',
         'unpaid'
       )
       RETURNING *
       `,
       [
+        body.service_type, // courier OR notary
         body.customer_id || null,
         email,
         body.pickup_address || null,
@@ -129,6 +133,7 @@ async function handleOrders(req, res, pool, pathname, method, json) {
         body.scheduled_time || null,
         toNumber(body.distance_miles, 0),
         totalAmount,
+        body.notes || null,
       ]
     );
 
@@ -190,7 +195,7 @@ async function handleOrders(req, res, pool, pathname, method, json) {
 
   /* ======================================================
      POST /api/orders/:id/manual-pay
-     Admin / Ops manual payment override
+     Admin manual payment override
   ====================================================== */
   if (
     method === "POST" &&
@@ -228,11 +233,7 @@ async function handleOrders(req, res, pool, pathname, method, json) {
       });
     }
 
-    if (
-      !["confirmed_pending_payment", "approved_pending_payment"].includes(
-        order.status
-      )
-    ) {
+    if (order.status !== "approved_pending_payment") {
       return json(res, 400, {
         error: `Cannot manually pay order in status '${order.status}'`,
       });

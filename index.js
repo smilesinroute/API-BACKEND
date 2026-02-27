@@ -5,8 +5,8 @@
  * ==================================
  * - Plain Node.js HTTP (NO Express)
  * - Strict credential-safe CORS
- * - Token-based driver auth
  * - Courier + Notary unified under orders table
+ * - Instant quote support for both services
  */
 
 const url = require("url");
@@ -121,7 +121,7 @@ async function readJson(req) {
 }
 
 /* ======================================================
-   QUOTE BUILDER
+   QUOTE BUILDERS
 ====================================================== */
 function buildCourierQuote({ miles }) {
   const base = 25;
@@ -130,6 +130,24 @@ function buildCourierQuote({ miles }) {
 
   return {
     breakdown: { base, mileage },
+    total,
+  };
+}
+
+function buildNotaryQuote({ signers, document_type }) {
+  const travelBase = 35;
+  const signerFee = 15 * Number(signers || 1);
+  const realEstateFee =
+    document_type === "Real estate" ? 25 : 0;
+
+  const total = travelBase + signerFee + realEstateFee;
+
+  return {
+    breakdown: {
+      travelBase,
+      signerFee,
+      realEstateFee,
+    },
     total,
   };
 }
@@ -160,6 +178,7 @@ async function handleAPI(req, res, pool) {
     /* ================= COURIER QUOTE ================= */
     if (pathname === "/api/quote" && method === "POST") {
       const body = await readJson(req);
+
       const { breakdown, total } = buildCourierQuote({
         miles: body.distance_miles,
       });
@@ -171,16 +190,31 @@ async function handleAPI(req, res, pool) {
       });
     }
 
-    /* ================= COURIER CONFIRM ================= */
-    if (pathname === "/api/confirm" && method === "POST") {
+    /* ================= NOTARY QUOTE ================= */
+    if (pathname === "/api/notary/quote" && method === "POST") {
       const body = await readJson(req);
 
-      if (!body.customer_email) {
-        return json(res, 400, { error: "customer_email is required" });
-      }
+      const { breakdown, total } = buildNotaryQuote({
+        signers: body.signers,
+        document_type: body.document_type,
+      });
 
-      const miles = Number(body.distance_miles || 0);
-      const { total } = buildCourierQuote({ miles });
+      return json(res, 200, {
+        quote_id: crypto.randomUUID(),
+        breakdown,
+        total,
+      });
+    }
+
+    /* ================= UNIFIED ORDER SUBMISSION ================= */
+    if (pathname === "/api/orders" && method === "POST") {
+      const body = await readJson(req);
+
+      if (!body.service_type || !body.customer_email) {
+        return json(res, 400, {
+          error: "service_type and customer_email are required",
+        });
+      }
 
       const { rows } = await pool.query(
         `INSERT INTO orders (
@@ -190,74 +224,36 @@ async function handleAPI(req, res, pool) {
           delivery_address,
           distance_miles,
           total_amount,
+          scheduled_date,
+          scheduled_time,
+          notes,
           status,
           payment_status
         )
         VALUES (
-          'courier',
-          $1,$2,$3,$4,$5,
-          'confirmed_pending_payment',
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,
+          'pending_admin_review',
           'unpaid'
         )
         RETURNING *`,
         [
+          body.service_type,
           body.customer_email,
           body.pickup_address || null,
           body.delivery_address || null,
-          miles,
-          total,
-        ]
-      );
-
-      return json(res, 201, rows[0]);
-    }
-
-    /* ================= NOTARY REQUEST ================= */
-    if (pathname === "/api/notary/request" && method === "POST") {
-      const body = await readJson(req);
-
-      if (!body.customer_email || !body.customer_name) {
-        return json(res, 400, {
-          error: "customer_name and customer_email are required",
-        });
-      }
-
-      const { rows } = await pool.query(
-        `INSERT INTO orders (
-          service_type,
-          customer_email,
-          customer_name,
-          pickup_address,
-          notes,
-          scheduled_date,
-          scheduled_time,
-          status,
-          payment_status
-        )
-        VALUES (
-          'notary',
-          $1,$2,$3,$4,$5,$6,
-          'confirmed_pending_payment',
-          'unpaid'
-        )
-        RETURNING *`,
-        [
-          body.customer_email,
-          body.customer_name,
-          body.address || null,
-          body.notes || null,
+          body.distance_miles || null,
+          body.total_amount || 0,
           body.scheduled_date || null,
           body.scheduled_time || null,
+          body.notes || null,
         ]
       );
 
       return json(res, 201, rows[0]);
     }
 
-    /* ================= DRIVER LOGIN ================= */
+    /* ================= DRIVER ================= */
     if (await handleDriverLogin(req, res, pool)) return;
-
-    /* ================= DRIVER ROUTES ================= */
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
     if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
@@ -278,7 +274,9 @@ async function handleAPI(req, res, pool) {
 
   } catch (err) {
     console.error("[API ROUTER ERROR]", err);
-    return json(res, 500, { error: err.message || "Server error" });
+    return json(res, 500, {
+      error: err.message || "Server error",
+    });
   }
 }
 
