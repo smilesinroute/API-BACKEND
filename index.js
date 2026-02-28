@@ -6,7 +6,8 @@
  * - Plain Node.js HTTP (NO Express)
  * - Strict credential-safe CORS
  * - Courier + Notary unified under orders table
- * - Instant quote support for both services
+ * - Region + ID address support
+ * - Admin review required before payment
  */
 
 const url = require("url");
@@ -123,6 +124,7 @@ async function readJson(req) {
 /* ======================================================
    QUOTE BUILDERS
 ====================================================== */
+
 function buildCourierQuote({ miles }) {
   const base = 25;
   const mileage = Number((Number(miles || 0) * 2.25).toFixed(2));
@@ -219,8 +221,10 @@ async function handleAPI(req, res, pool) {
       const { rows } = await pool.query(
         `INSERT INTO orders (
           service_type,
+          region,
           customer_email,
           pickup_address,
+          id_address,
           delivery_address,
           distance_miles,
           total_amount,
@@ -231,15 +235,17 @@ async function handleAPI(req, res, pool) {
           payment_status
         )
         VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
           'pending_admin_review',
           'unpaid'
         )
         RETURNING *`,
         [
           body.service_type,
+          body.region || null,
           body.customer_email,
           body.pickup_address || null,
+          body.id_address || null,
           body.delivery_address || null,
           body.distance_miles || null,
           body.total_amount || 0,
