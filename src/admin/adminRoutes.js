@@ -22,6 +22,16 @@ function toNumber(v) {
 }
 
 /* ======================================================
+   DISPATCH PRIORITY
+====================================================== */
+
+function getDispatchPriority(order) {
+  if (order.urgent) return "urgent";
+  if (order.priority || order.time_sensitive) return "priority";
+  return "standard";
+}
+
+/* ======================================================
    ORDER PATH PARSER
 ====================================================== */
 
@@ -54,7 +64,7 @@ async function loadOrder(pool, orderId) {
 }
 
 /* ======================================================
-   DASHBOARD STATUS → LANE MAP
+   STATUS → DASHBOARD LANE
 ====================================================== */
 
 function laneForStatus(status) {
@@ -82,22 +92,43 @@ function laneForStatus(status) {
 ====================================================== */
 
 async function buildDashboardPayload(pool) {
-  const { rows: orders } = await pool.query(`
+  const { rows } = await pool.query(`
     SELECT
-      id,
-      status,
-      service_type,
-      pickup_address,
-      delivery_address,
-      scheduled_date,
-      scheduled_time,
-      total_amount,
-      customer_email,
-      assigned_driver_id,
-      created_at
-    FROM orders
-    WHERE status NOT IN ('completed','rejected','cancelled')
-    ORDER BY created_at DESC
+      o.id,
+      o.status,
+      o.service_type,
+      o.vehicle_type,
+
+      o.fragile,
+      o.priority,
+      o.time_sensitive,
+      o.urgent,
+
+      o.customer_name,
+      o.customer_phone,
+      o.customer_email,
+
+      o.pickup_address,
+      o.delivery_address,
+      o.distance_miles,
+
+      o.scheduled_date,
+      o.scheduled_time,
+
+      o.total_amount,
+
+      o.assigned_driver_id,
+      d.name AS driver_name,
+
+      o.created_at
+
+    FROM orders o
+    LEFT JOIN drivers d
+      ON d.id = o.assigned_driver_id
+
+    WHERE o.status NOT IN ('completed','rejected','cancelled')
+
+    ORDER BY o.created_at DESC
   `);
 
   const lanes = {
@@ -106,10 +137,11 @@ async function buildDashboardPayload(pool) {
     active: [],
   };
 
-  for (const order of orders) {
+  for (const order of rows) {
     const lane = laneForStatus(order.status);
 
     if (lane) {
+      order.dispatch_priority = getDispatchPriority(order);
       lanes[lane].push(order);
     }
   }
@@ -252,7 +284,6 @@ async function rejectOrder(pool, json, res, orderId) {
 
 async function assignDriver(pool, json, res, req, orderId) {
   const body = await readJson(req);
-
   const driverId = String(body.driver_id || "").trim();
 
   if (!driverId) {
