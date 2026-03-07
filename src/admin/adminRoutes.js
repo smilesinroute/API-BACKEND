@@ -94,41 +94,37 @@ function laneForStatus(status) {
 async function buildDashboardPayload(pool) {
   const { rows } = await pool.query(`
     SELECT
-      o.id,
-      o.status,
-      o.service_type,
-      o.vehicle_type,
+  o.id,
+  o.status,
+  o.service_type,
 
-      o.fragile,
-      o.priority,
-      o.time_sensitive,
-      o.urgent,
+  o.customer_name,
+  o.customer_email,
 
-      o.customer_name,
-      o.customer_phone,
-      o.customer_email,
+  o.pickup_address,
+  o.delivery_address,
 
-      o.pickup_address,
-      o.delivery_address,
-      o.distance_miles,
+  o.distance_miles,
 
-      o.scheduled_date,
-      o.scheduled_time,
+  o.scheduled_date,
+  o.scheduled_time,
 
-      o.total_amount,
+  o.total_amount,
 
-      o.assigned_driver_id,
-      d.name AS driver_name,
+  o.pricing_breakdown,
 
-      o.created_at
+  o.assigned_driver_id,
+  d.name AS driver_name,
 
-    FROM orders o
-    LEFT JOIN drivers d
-      ON d.id = o.assigned_driver_id
+  o.created_at
 
-    WHERE o.status NOT IN ('completed','rejected','cancelled')
+FROM orders o
+LEFT JOIN drivers d
+  ON d.id = o.assigned_driver_id
 
-    ORDER BY o.created_at DESC
+WHERE o.status NOT IN ('completed','rejected','cancelled')
+
+ORDER BY o.created_at DESC
   `);
 
   const lanes = {
