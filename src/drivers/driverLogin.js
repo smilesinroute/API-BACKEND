@@ -1,26 +1,48 @@
 "use strict";
 
-const url = require("url");
+const { URL } = require("url");
 const { createDriverSession } = require("../lib/driverAuth");
 
-function sendJSON(res, status, data) {
+/* ======================================================
+   RESPONSE HELPER
+====================================================== */
+
+function sendJSON(res, status, payload) {
   if (res.writableEnded) return;
+
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(data));
+  res.end(JSON.stringify(payload));
 }
 
-async function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", chunk => data += chunk);
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
-  });
+/* ======================================================
+   BODY PARSER
+====================================================== */
+
+async function readJson(req) {
+  let body = "";
+
+  for await (const chunk of req) {
+    body += chunk;
+  }
+
+  if (!body) return {};
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error("Invalid JSON body");
+  }
 }
+
+/* ======================================================
+   DRIVER LOGIN ROUTE
+   POST /api/driver/login
+====================================================== */
 
 async function handleDriverLogin(req, res, db) {
-  const parsed = url.parse(req.url, true);
+
+  const parsed = new URL(req.url, `http://${req.headers.host}`);
   const pathname = parsed.pathname || "/";
   const method = String(req.method || "GET").toUpperCase();
 
@@ -29,22 +51,44 @@ async function handleDriverLogin(req, res, db) {
   }
 
   try {
-    const raw = await readBody(req);
-    const body = JSON.parse(raw || "{}");
-    const email = String(body.email || "").toLowerCase().trim();
+
+    const body = await readJson(req);
+
+    const email = String(body.email || "")
+      .toLowerCase()
+      .trim();
 
     if (!email) {
-      return sendJSON(res, 400, { error: "Email required" });
+      return sendJSON(res, 400, {
+        ok: false,
+        error: "Email required"
+      });
     }
 
+    /* --------------------------------------------------
+       Verify driver exists
+    -------------------------------------------------- */
+
     const { rows } = await db.query(
-      `SELECT id FROM drivers WHERE lower(email) = lower($1) LIMIT 1`,
+      `
+      SELECT id
+      FROM drivers
+      WHERE lower(email) = lower($1)
+      LIMIT 1
+      `,
       [email]
     );
 
     if (!rows.length) {
-      return sendJSON(res, 404, { error: "Driver not found" });
+      return sendJSON(res, 404, {
+        ok: false,
+        error: "Driver not found"
+      });
     }
+
+    /* --------------------------------------------------
+       Create session token
+    -------------------------------------------------- */
 
     const token = await createDriverSession(db, rows[0].id);
 
@@ -54,8 +98,14 @@ async function handleDriverLogin(req, res, db) {
     });
 
   } catch (err) {
-    console.error("Driver login error:", err);
-    return sendJSON(res, 500, { error: "Server error" });
+
+    console.error("[DRIVER] login error:", err);
+
+    return sendJSON(res, 500, {
+      ok: false,
+      error: "Server error"
+    });
+
   }
 }
 

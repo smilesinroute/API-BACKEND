@@ -4,39 +4,47 @@
  * Driver Routes — Token Based
  * ============================
  * Handles lightweight authenticated driver routes.
- * Orders handled separately in driverOrders.js
+ * Order workflows are handled in driverOrders.js
  */
 
-const url = require("url");
+const { URL } = require("url");
 const { requireDriver } = require("../lib/driverAuth");
 
 /* ======================================================
    RESPONSE HELPER
 ====================================================== */
-function sendJSON(res, status, data) {
+
+function sendJSON(res, status, payload) {
   if (res.writableEnded) return;
+
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(data));
+  res.end(JSON.stringify(payload));
 }
 
 /* ======================================================
    ROUTE HANDLER
 ====================================================== */
+
 async function handleDriverRoutes(req, res, db) {
-  const parsed = url.parse(req.url, true);
+
+  const parsed = new URL(req.url, `http://${req.headers.host}`);
   const pathname = parsed.pathname || "/";
   const method = String(req.method || "GET").toUpperCase();
 
   /* ======================================================
      GET /api/driver/me
-     - Requires valid token
-     - Does NOT require selfie
+     Returns authenticated driver profile
+     - Requires valid session
+     - Does NOT require selfie verification
   ====================================================== */
+
   if (pathname === "/api/driver/me" && method === "GET") {
+
     try {
+
       const session = await requireDriver(db, req, {
-        requireSelfie: false,
+        requireSelfie: false
       });
 
       const { rows } = await db.query(
@@ -59,22 +67,30 @@ async function handleDriverRoutes(req, res, db) {
       if (!rows.length) {
         return sendJSON(res, 404, {
           ok: false,
-          error: "Driver not found",
+          error: "Driver not found"
         });
       }
 
       return sendJSON(res, 200, {
         ok: true,
-        driver: rows[0],
+        driver: rows[0]
       });
 
     } catch (err) {
+
+      console.error("[DRIVER] auth error:", err);
+
       return sendJSON(res, 401, {
         ok: false,
-        error: err.message || "Unauthorized",
+        error: err.message || "Unauthorized"
       });
+
     }
   }
+
+  /* ======================================================
+     No route matched
+====================================================== */
 
   return false;
 }

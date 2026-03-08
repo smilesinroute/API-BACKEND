@@ -4,8 +4,8 @@
  * Driver Selfie Upload (Production)
  * ---------------------------------
  * - Cloudflare Access identity ONLY
- * - No driver_id from client
- * - Enforces image uploads
+ * - No driver_id accepted from client
+ * - Validates image uploads
  * - Resets verification on every upload
  */
 
@@ -14,14 +14,16 @@ const fs = require("fs");
 const path = require("path");
 const { supabase } = require("../lib/supabase");
 
-/* --------------------------------------------------
+/* ======================================================
    Helpers
--------------------------------------------------- */
+====================================================== */
 
-function send(res, status, message) {
+function json(res, status, payload) {
   if (res.writableEnded) return;
+
   res.statusCode = status;
-  res.end(message);
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(payload));
 }
 
 function normalizeEmail(v) {
@@ -41,92 +43,163 @@ const ALLOWED_MIME = new Set([
   "image/webp"
 ]);
 
-/* --------------------------------------------------
-   Main handler
--------------------------------------------------- */
+/* ======================================================
+   Main Handler
+====================================================== */
 
 async function handleDriverSelfie(req, res, pool) {
+
   const cfEmail = getCloudflareEmail(req);
 
   if (!cfEmail) {
-    return send(res, 401, "Missing Cloudflare identity");
+    return json(res, 401, {
+      ok: false,
+      error: "Missing Cloudflare identity"
+    });
   }
 
-  // Resolve driver from Cloudflare email
-  const { rows } = await pool.query(
-    `
-    SELECT id
-    FROM drivers
-    WHERE lower(email) = lower($1)
-    LIMIT 1
-    `,
-    [cfEmail]
-  );
+  try {
 
-  const driver = rows[0];
-  if (!driver) {
-    return send(res, 403, "Driver not authorized");
-  }
+    /* --------------------------------------------------
+       Resolve driver by Cloudflare identity
+    -------------------------------------------------- */
 
-  const form = formidable({
-    maxFileSize: 5 * 1024 * 1024, // 5MB
-    keepExtensions: true,
-    multiples: false,
-  });
+    const { rows } = await pool.query(
+      `
+      SELECT id
+      FROM drivers
+      WHERE lower(email) = lower($1)
+      LIMIT 1
+      `,
+      [cfEmail]
+    );
 
-  form.parse(req, async (err, _fields, files) => {
-    if (err) {
-      return send(res, 400, "Invalid upload");
+    const driver = rows[0];
+
+    if (!driver) {
+      return json(res, 403, {
+        ok: false,
+        error: "Driver not authorized"
+      });
     }
 
-    const photo = files.photo;
-    if (!photo) {
-      return send(res, 400, "photo is required");
-    }
+    /* --------------------------------------------------
+       Parse upload
+    -------------------------------------------------- */
 
-    if (!ALLOWED_MIME.has(photo.mimetype)) {
-      return send(res, 415, "Unsupported image type");
-    }
+    const form = formidable({
+      maxFileSize: 5 * 1024 * 1024,
+      keepExtensions: true,
+      multiples: false
+    });
 
-    const ext = path.extname(photo.originalFilename || ".jpg");
-    const storagePath = `drivers/${driver.id}/selfie${ext}`;
+    form.parse(req, async (err, _fields, files) => {
 
-    try {
-      const buffer = fs.readFileSync(photo.filepath);
+      if (err) {
+        console.error("[DRIVER SELFIE] parse error:", err);
+        return json(res, 400, {
+          ok: false,
+          error: "Invalid upload"
+        });
+      }
 
-      const { error } = await supabase.storage
-        .from("driver-photos")
-        .upload(storagePath, buffer, {
-          contentType: photo.mimetype,
-          upsert: true,
+      const photo = files.photo;
+
+      if (!photo) {
+        return json(res, 400, {
+          ok: false,
+          error: "photo is required"
+        });
+      }
+
+      if (!ALLOWED_MIME.has(photo.mimetype)) {
+        return json(res, 415, {
+          ok: false,
+          error: "Unsupported image type"
+        });
+      }
+
+      const ext =
+        path.extname(photo.originalFilename || ".jpg")
+          .toLowerCase();
+
+      const storagePath =
+        `drivers/${driver.id}/selfie${ext}`;
+
+      try {
+
+        /* --------------------------------------------------
+           Upload to Supabase Storage
+        -------------------------------------------------- */
+
+        const buffer = fs.readFileSync(photo.filepath);
+
+        const { error } = await supabase.storage
+          .from("driver-photos")
+          .upload(storagePath, buffer, {
+            contentType: photo.mimetype,
+            upsert: true
+          });
+
+        if (error) throw error;
+
+        const publicUrl =
+          supabase
+            .storage
+            .from("driver-photos")
+            .getPublicUrl(storagePath)
+            .data.publicUrl;
+
+        /* --------------------------------------------------
+           Update driver record
+        -------------------------------------------------- */
+
+        await pool.query(
+          `
+          UPDATE drivers
+          SET
+            selfie_uploaded = true,
+            selfie_verified = false,
+            selfie_image_url = $2,
+            last_selfie_at = NOW()
+          WHERE id = $1
+          `,
+          [driver.id, publicUrl]
+        );
+
+        /* --------------------------------------------------
+           Clean up temp file
+        -------------------------------------------------- */
+
+        try {
+          fs.unlinkSync(photo.filepath);
+        } catch (_) {}
+
+        return json(res, 200, {
+          ok: true,
+          selfie_url: publicUrl
         });
 
-      if (error) throw error;
+      } catch (uploadErr) {
 
-      const publicUrl =
-        supabase.storage
-          .from("driver-photos")
-          .getPublicUrl(storagePath).data.publicUrl;
+        console.error("[DRIVER SELFIE] upload error:", uploadErr);
 
-      await pool.query(
-        `
-        UPDATE drivers
-        SET
-          selfie_uploaded = true,
-          selfie_verified = false,
-          selfie_image_url = $2,
-          last_selfie_at = NOW()
-        WHERE id = $1
-        `,
-        [driver.id, publicUrl]
-      );
+        return json(res, 500, {
+          ok: false,
+          error: "Upload failed"
+        });
+      }
+    });
 
-      return send(res, 200, "Selfie uploaded");
-    } catch (e) {
-      console.error("[DRIVER SELFIE]", e);
-      return send(res, 500, "Upload failed");
-    }
-  });
+  } catch (err) {
+
+    console.error("[DRIVER SELFIE] server error:", err);
+
+    return json(res, 500, {
+      ok: false,
+      error: "Server error"
+    });
+  }
 }
 
 module.exports = { handleDriverSelfie };
