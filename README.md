@@ -1,360 +1,237 @@
-\# Smiles In Route — Platform API
+# Smiles In Route — Platform API
 
+## Purpose
 
+Core backend API powering the Smiles In Route logistics platform.
 
-\## Purpose
+This API is the central system for all portals:
 
+* Customer Portal
+* Admin Dispatch Portal
+* Driver Portal
 
+Future system:
 
-Core backend API powering:
-
-
-
-\- Customer Portal
-
-\- Ops Portal
-
-\- Driver Portal
-
-\- Admin workflows
-
-
+* Ops Portal (not yet implemented)
 
 This API handles:
 
+* Pricing logic
+* Availability
+* Unified order creation
+* Order lifecycle management
+* Admin dispatch workflow
+* Driver assignment
+* Driver delivery workflow
+* Stripe payment confirmation
 
-
-\- Pricing logic
-
-\- Availability
-
-\- Unified order creation
-
-\- Order lifecycle management
-
-\- Driver assignment
-
-\- Admin review
-
-
-
-This is the single source of truth for all business logic.
-
-
+This API is the single source of truth for all business logic.
 
 ---
 
+# Architecture Overview
 
+Platform stack:
 
-\# Architecture Overview
+* Node.js native HTTP server (no Express)
+* PostgreSQL (Supabase)
+* Strict CORS policy
+* Unified orders table
+* Internal service modules
 
+Primary router:
 
-
-\- Node.js (native HTTP, no Express)
-
-\- PostgreSQL
-
-\- Strict CORS policy
-
-\- Unified `orders` table
-
-\- Role-based access (not role-based endpoints)
-
-
+server.js
+↓
+index.js
+↓
+controllers / drivers / admin modules
 
 All portals communicate with this API.
 
-
-
 ---
 
+# Canonical Public Endpoints
 
-
-\# Canonical Public Endpoints
-
-
-
-\## Health Check
-
-
+## Health Check
 
 GET /api/health
 
-
-
----
-
-
-
-\# NOTARY
-
-
-
-\## Quote
-
-
-
-POST /api/notary/quote
-
-
-
-Body:
-
-{
-
-&nbsp; region: string,
-
-&nbsp; signers: number,
-
-&nbsp; document\_type: string
-
-}
-
-
-
-Returns:
-
-{
-
-&nbsp; quote\_id: string,
-
-&nbsp; breakdown: object,
-
-&nbsp; total: number
-
-}
-
-
-
-Pricing is calculated server-side.
-
-
+Returns API status.
 
 ---
 
-
-
-\# COURIER
-
-
-
-\## Quote
-
-
+# Courier Quotes
 
 POST /api/quote
 
-
-
-Body:
-
-{
-
-&nbsp; distance\_miles: number
-
-}
-
-
-
-Returns:
-
-{
-
-&nbsp; quote\_id: string,
-
-&nbsp; breakdown: object,
-
-&nbsp; total: number
-
-}
-
-
+All pricing is calculated server-side.
 
 ---
 
+# Notary Quotes
 
+POST /api/notary/quote
 
-\# Unified Order Submission
+---
 
-
+# Unified Order Submission
 
 POST /api/orders
 
-
-
-Body:
-
-{
-
-&nbsp; service\_type: "courier" | "notary",
-
-&nbsp; region?: string,
-
-&nbsp; customer\_email: string,
-
-
-
-&nbsp; pickup\_address?: string,
-
-&nbsp; delivery\_address?: string,
-
-&nbsp; id\_address?: string,
-
-
-
-&nbsp; scheduled\_date?: string,
-
-&nbsp; scheduled\_time?: string,
-
-
-
-&nbsp; total\_amount: number,
-
-&nbsp; notes?: string,
-
-&nbsp; pricing\_breakdown?: object
-
-}
-
-
-
 All portals must submit orders here.
-
-
 
 No portal may bypass this endpoint.
 
+---
 
+# Order Lifecycle
+
+Primary order statuses:
+
+pending_admin_review
+approved_pending_payment
+ready_for_dispatch
+assigned
+en_route
+completed
+rejected
+cancelled
+
+Payment statuses:
+
+unpaid
+paid
+
+Lifecycle flow:
+
+Customer submits order
+↓
+pending_admin_review
+↓
+Admin approves
+↓
+approved_pending_payment
+↓
+Customer pays via Stripe
+↓
+ready_for_dispatch
+↓
+Dispatch assigns driver
+↓
+assigned
+↓
+Driver begins route
+↓
+en_route
+↓
+Driver completes job
+↓
+completed
 
 ---
 
+# Driver Portal Endpoints
 
+POST /api/driver/login
 
-\# Order Lifecycle
+GET /api/driver/orders
 
+POST /api/driver/order/:id/accept
 
+POST /api/driver/order/:id/start
 
-Status values:
+POST /api/driver/order/:id/complete
 
+POST /api/driver/proof
 
-
-\- pending\_admin\_review
-
-\- approved
-
-\- assigned
-
-\- in\_progress
-
-\- completed
-
-\- cancelled
-
-
-
-Payment status:
-
-
-
-\- unpaid
-
-\- paid
-
-
-
-Status transitions are controlled by internal routes only.
-
-
+Files stored in Supabase Storage.
 
 ---
 
+# Dispatch
 
+POST /dispatch/assign-driver
 
-\# Internal Routes (Unstable)
+Body:
 
+order_id
+driver_id
 
+Updates:
 
-\- /admin/\*
-
-\- /drivers/\*
-
-\- /ops/\*
-
-
-
-These may change without notice.
-
-
+orders.assigned_driver_id
+orders.status = assigned
 
 ---
 
+# Stripe Payments
 
+POST /api/webhook/stripe
 
-\# Core Rules
+Updates:
 
-
-
-\- Pricing always calculated on server.
-
-\- Frontend never calculates totals.
-
-\- All new services must use unified /api/orders.
-
-\- Region logic must be determined before quote request.
-
-\- 200 responses return empty arrays when no data found.
-
-\- 404 is used only for unknown routes.
-
-
+payment_status = paid
+status = ready_for_dispatch
 
 ---
 
+# Internal Admin Routes
 
+/admin/dashboard
+/admin/orders
+/admin/orders/:id/approve
+/admin/orders/:id/reject
 
-\# Deployment
+These routes are internal and may change.
 
+---
 
+# Core System Rules
 
-Required Environment Variables:
+* Pricing always calculated server-side
+* Frontend never calculates totals
+* All services must use unified /api/orders
+* Order totals must match server pricing
+* Region validation must occur before quote
+* Empty queries return empty arrays
+* 404 reserved for unknown routes
 
+---
 
+# Deployment
 
-DATABASE\_URL  
+Environment variables required:
 
-NODE\_ENV  
+PG_HOST
+PG_USER
+PG_PASSWORD
+PG_DATABASE
+PG_PORT
 
-CORS\_ALLOWED\_ORIGINS  
+STRIPE_SECRET_KEY
+STRIPE_WEBHOOK_SECRET
 
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
 
+CORS_ALLOWED_ORIGINS
 
-Deploy target:
+Deployment target:
 
 Render
 
-
-
 ---
 
+# Contract Authority
 
+If frontend and backend disagree:
 
-\# Contract Authority
+Backend contract wins.
 
+Update this document whenever:
 
-
-If frontend and backend disagree,
-
-backend contract wins.
-
-
-
-Update this file whenever:
-
-
-
-\- Endpoint structure changes
-
-\- Pricing logic changes
-
-\- Order lifecycle changes
-
+* Endpoint structure changes
+* Pricing logic changes
+* Order lifecycle changes
+* Driver workflow changes
