@@ -10,11 +10,6 @@ Core backend API for:
 - Ops Portal
 - Driver Portal
 - Admin workflows
-
-Architecture:
-- Native Node HTTP
-- PostgreSQL
-- Controller based routing
 */
 
 const { URL } = require("url");
@@ -71,7 +66,7 @@ function parseAllowedOrigins() {
       "https://drivers.smilesinroute.delivery",
       "https://ops.smilesinroute.delivery",
       "http://localhost:5173",
-      "http://127.0.0.1:5173",
+      "http://127.0.0.1:5173"
     ]);
   }
 
@@ -101,7 +96,7 @@ function applyCors(req, res) {
 }
 
 /* ===============================
-BODY PARSING
+BODY PARSER
 =============================== */
 
 async function readBody(req) {
@@ -126,7 +121,7 @@ async function readJson(req) {
 }
 
 /* ===============================
-VALIDATION HELPERS
+HELPERS
 =============================== */
 
 function toLower(v) {
@@ -148,6 +143,7 @@ COURIER PRICING
 =============================== */
 
 const COURIER_PRICING = {
+
   regions: {
     texas: { base: 28, perMile: 2.55 },
     oregon: { base: 26, perMile: 2.35 },
@@ -155,30 +151,58 @@ const COURIER_PRICING = {
     default: { base: 26, perMile: 2.35 }
   },
 
+  addons: {
+    fragile: 10,
+    priority: 20,
+    timeSensitive: 15
+  },
+
   minimumCharge: 35
 };
 
-function buildCourierQuote({ miles, region }) {
+function buildCourierQuote({
+  miles,
+  region,
+  fragile,
+  priority,
+  timeSensitive
+}) {
 
-  const pricing = COURIER_PRICING.regions[region] ||
-                  COURIER_PRICING.regions.default;
+  const pricing =
+    COURIER_PRICING.regions[region] ||
+    COURIER_PRICING.regions.default;
 
   const distance = clamp(miles, 0, 5000);
 
-  const total = Math.max(
-    pricing.base + distance * pricing.perMile,
-    COURIER_PRICING.minimumCharge
-  );
+  const mileage = distance * pricing.perMile;
+
+  const fragileFee = fragile ? COURIER_PRICING.addons.fragile : 0;
+  const priorityFee = priority ? COURIER_PRICING.addons.priority : 0;
+  const timeFee = timeSensitive ? COURIER_PRICING.addons.timeSensitive : 0;
+
+  const subtotal =
+    pricing.base +
+    mileage +
+    fragileFee +
+    priorityFee +
+    timeFee;
+
+  const total = Math.max(subtotal, COURIER_PRICING.minimumCharge);
 
   return {
+
     breakdown: {
       service_type: "courier",
       region,
       distance_miles: distance,
       base: pricing.base,
-      perMile: pricing.perMile
+      perMile: pricing.perMile,
+      fragile: fragileFee,
+      priority: priorityFee,
+      timeSensitive: timeFee
     },
-    total
+
+    total: Number(total.toFixed(2))
   };
 }
 
@@ -187,30 +211,40 @@ NOTARY PRICING
 =============================== */
 
 const NOTARY_PRICING = {
+
   regions: {
     texas: { base: 95, extraSignerFee: 20 },
     oregon: { base: 85, extraSignerFee: 15 },
     washington: { base: 105, extraSignerFee: 20 },
     default: { base: 85, extraSignerFee: 15 }
   }
+
 };
 
 function buildNotaryQuote({ region, signers }) {
 
-  const pricing = NOTARY_PRICING.regions[region] ||
-                  NOTARY_PRICING.regions.default;
+  const pricing =
+    NOTARY_PRICING.regions[region] ||
+    NOTARY_PRICING.regions.default;
 
   const signerCount = clamp(signers, 1, 20);
 
-  const extra = Math.max(0, signerCount - 1) * pricing.extraSignerFee;
+  const extra =
+    Math.max(0, signerCount - 1) * pricing.extraSignerFee;
+
+  const total = pricing.base + extra;
 
   return {
+
     breakdown: {
       service_type: "notary",
       region,
-      signers: signerCount
+      signers: signerCount,
+      base: pricing.base,
+      extraSigners: extra
     },
-    total: pricing.base + extra
+
+    total: Number(total.toFixed(2))
   };
 }
 
@@ -257,8 +291,14 @@ async function handleAPI(req, res, pool) {
       const region = toLower(body.region) || "default";
 
       const quote = buildCourierQuote({
+
         miles: body.distance_miles,
-        region
+        region,
+
+        fragile: !!body.fragile,
+        priority: !!body.priority,
+        timeSensitive: !!body.timeSensitive
+
       });
 
       return json(res, 200, {
@@ -309,7 +349,7 @@ async function handleAPI(req, res, pool) {
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
 
     /* ===============================
-    ORDERS CONTROLLER
+    ORDERS
     =============================== */
 
     if (await handleOrders(req, res, pool, pathname, method, json)) return;
