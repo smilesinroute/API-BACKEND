@@ -13,6 +13,7 @@ const { getDistanceMiles } = require("../lib/distanceMatrix");
 /* ======================================================
    HELPERS
 ====================================================== */
+
 function isNonEmptyString(v) {
   return typeof v === "string" && v.trim().length > 0;
 }
@@ -25,7 +26,9 @@ function toNumber(v, fallback = 0) {
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let data = "";
+
     req.on("data", (chunk) => (data += chunk));
+
     req.on("end", () => {
       try {
         resolve(data ? JSON.parse(data) : {});
@@ -33,6 +36,7 @@ function readJson(req) {
         reject(new Error("Invalid JSON body"));
       }
     });
+
     req.on("error", reject);
   });
 }
@@ -40,6 +44,7 @@ function readJson(req) {
 /* ======================================================
    PRICING LOOKUP
 ====================================================== */
+
 async function getPricingFor(pool, region, serviceType, vehicleType) {
   const { rows } = await pool.query(
     `
@@ -63,12 +68,15 @@ async function getPricingFor(pool, region, serviceType, vehicleType) {
 /* ======================================================
    MAIN HANDLER
 ====================================================== */
+
 async function handleQuote(req, res, pool, pathname, method, json) {
+
   if (pathname !== "/api/quote" || method !== "POST") {
     return false;
   }
 
   try {
+
     const body = await readJson(req);
 
     const serviceType = String(body.serviceType || "").trim();
@@ -95,7 +103,10 @@ async function handleQuote(req, res, pool, pathname, method, json) {
     let perMile = toNumber(pricing.rate_per_mile, 0);
     let distance = 0;
 
+    /* ================= COURIER DISTANCE ================= */
+
     if (serviceType === "courier") {
+
       if (!pickupAddress || !dropoffAddress) {
         return json(res, 400, {
           error: "pickupAddress and dropoffAddress are required",
@@ -105,18 +116,31 @@ async function handleQuote(req, res, pool, pathname, method, json) {
       distance = await getDistanceMiles(pickupAddress, dropoffAddress);
     }
 
+    /* ================= BASE CALCULATION ================= */
+
     let total = baseFee + distance * perMile;
 
-    const fragile = body.isFragile ? toNumber(pricing.fragile_fee, 0) : 0;
-    const priority = body.isPriority ? toNumber(pricing.priority_fee, 0) : 0;
-    const timeSensitive = body.isTimeSensitive
+    /* ================= ADD-ONS ================= */
+
+    const fragile = body.fragile
+      ? toNumber(pricing.fragile_fee, 0)
+      : 0;
+
+    const priority = body.priority
+      ? toNumber(pricing.priority_fee, 0)
+      : 0;
+
+    const timeSensitive = body.timeSensitive
       ? toNumber(pricing.time_sensitive_fee, 0)
       : 0;
-    const afterHours = body.isAfterHours
+
+    const afterHours = body.afterHours
       ? toNumber(pricing.after_hours_fee, 0)
       : 0;
 
     total += fragile + priority + timeSensitive + afterHours;
+
+    /* ================= RESPONSE ================= */
 
     return json(res, 200, {
       ok: true,
@@ -134,11 +158,15 @@ async function handleQuote(req, res, pool, pathname, method, json) {
       },
       total: Number(total.toFixed(2)),
     });
+
   } catch (err) {
+
     console.error("[QUOTE ERROR]", err);
+
     return json(res, 500, {
       error: err.message || "Quote calculation failed",
     });
+
   }
 }
 
