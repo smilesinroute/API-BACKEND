@@ -1,17 +1,6 @@
 
 "use strict";
 
-/*
-Smiles In Route — Platform API
-==============================
-
-Core backend API for:
-- Customer Portal
-- Ops Portal
-- Driver Portal
-- Admin workflows
-*/
-
 const { URL } = require("url");
 const crypto = require("crypto");
 
@@ -101,11 +90,7 @@ BODY PARSER
 
 async function readBody(req) {
   let body = "";
-
-  for await (const chunk of req) {
-    body += chunk;
-  }
-
+  for await (const chunk of req) body += chunk;
   return body;
 }
 
@@ -145,10 +130,27 @@ COURIER PRICING
 const COURIER_PRICING = {
 
   regions: {
-    texas: { base: 28, perMile: 2.55 },
-    oregon: { base: 26, perMile: 2.35 },
-    washington: { base: 30, perMile: 2.75 },
-    default: { base: 26, perMile: 2.35 }
+
+    texas: {
+      sedan: { base: 28, perMile: 2.55 },
+      cargo: { base: 42, perMile: 3.40 }
+    },
+
+    oregon: {
+      sedan: { base: 26, perMile: 2.35 },
+      cargo: { base: 40, perMile: 3.25 }
+    },
+
+    washington: {
+      sedan: { base: 30, perMile: 2.75 },
+      cargo: { base: 45, perMile: 3.60 }
+    },
+
+    default: {
+      sedan: { base: 26, perMile: 2.35 },
+      cargo: { base: 40, perMile: 3.25 }
+    }
+
   },
 
   addons: {
@@ -163,25 +165,29 @@ const COURIER_PRICING = {
 function buildCourierQuote({
   miles,
   region,
+  vehicle_type,
   fragile,
   priority,
   timeSensitive
 }) {
 
-  const pricing =
+  const regionPricing =
     COURIER_PRICING.regions[region] ||
     COURIER_PRICING.regions.default;
 
+  const vehiclePricing =
+    regionPricing[vehicle_type] || regionPricing.sedan;
+
   const distance = clamp(miles, 0, 5000);
 
-  const mileage = distance * pricing.perMile;
+  const mileage = distance * vehiclePricing.perMile;
 
   const fragileFee = fragile ? COURIER_PRICING.addons.fragile : 0;
   const priorityFee = priority ? COURIER_PRICING.addons.priority : 0;
   const timeFee = timeSensitive ? COURIER_PRICING.addons.timeSensitive : 0;
 
   const subtotal =
-    pricing.base +
+    vehiclePricing.base +
     mileage +
     fragileFee +
     priorityFee +
@@ -194,9 +200,11 @@ function buildCourierQuote({
     breakdown: {
       service_type: "courier",
       region,
+      vehicle_type,
       distance_miles: distance,
-      base: pricing.base,
-      perMile: pricing.perMile,
+      base: vehiclePricing.base,
+      perMile: vehiclePricing.perMile,
+      mileage: Number(mileage.toFixed(2)),
       fragile: fragileFee,
       priority: priorityFee,
       timeSensitive: timeFee
@@ -267,18 +275,14 @@ async function handleAPI(req, res, pool) {
 
   try {
 
-    /* ===============================
-    HEALTH
-    =============================== */
+    /* HEALTH */
 
     if (pathname === "/api/health" && method === "GET") {
       await pool.query("SELECT 1");
       return json(res, 200, { status: "ok" });
     }
 
-    /* ===============================
-    COURIER QUOTE
-    =============================== */
+    /* COURIER QUOTE */
 
     if (pathname === "/api/quote" && method === "POST") {
 
@@ -289,11 +293,13 @@ async function handleAPI(req, res, pool) {
       }
 
       const region = toLower(body.region) || "default";
+      const vehicle_type = toLower(body.vehicle_type) || "sedan";
 
       const quote = buildCourierQuote({
 
         miles: body.distance_miles,
         region,
+        vehicle_type,
 
         fragile: !!body.fragile,
         priority: !!body.priority,
@@ -307,9 +313,7 @@ async function handleAPI(req, res, pool) {
       });
     }
 
-    /* ===============================
-    NOTARY QUOTE
-    =============================== */
+    /* NOTARY QUOTE */
 
     if (pathname === "/api/notary/quote" && method === "POST") {
 
@@ -332,9 +336,7 @@ async function handleAPI(req, res, pool) {
       });
     }
 
-    /* ===============================
-    DRIVER ROUTES
-    =============================== */
+    /* DRIVER ROUTES */
 
     if (await handleDriverLogin(req, res, pool)) return;
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
@@ -342,27 +344,19 @@ async function handleAPI(req, res, pool) {
     if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
     if (await handleDriverProof(req, res, pool, pathname, method)) return;
 
-    /* ===============================
-    ADMIN ROUTES
-    =============================== */
+    /* ADMIN ROUTES */
 
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
 
-    /* ===============================
-    ORDERS
-    =============================== */
+    /* ORDERS */
 
     if (await handleOrders(req, res, pool, pathname, method, json)) return;
 
-    /* ===============================
-    AVAILABILITY
-    =============================== */
+    /* AVAILABILITY */
 
     if (await handleAvailability(req, res, pool, pathname, method, json)) return;
 
-    /* ===============================
-    ROOT
-    =============================== */
+    /* ROOT */
 
     if (pathname === "/" && method === "GET") {
       return text(res, 200, "Smiles In Route Platform API");
@@ -374,9 +368,8 @@ async function handleAPI(req, res, pool) {
 
     console.error("[PLATFORM API ERROR]", err);
 
-    return json(res, 500, {
-      error: "Server error"
-    });
+    return json(res, 500, { error: "Server error" });
+
   }
 }
 
