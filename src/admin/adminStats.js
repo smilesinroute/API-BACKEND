@@ -2,7 +2,7 @@
 
 async function handleAdminStats(req, res, pool, pathname, method, json) {
 
-  if (pathname !== "/api/admin/stats" || method !== "GET") {
+  if (pathname !== "/admin/stats" || method !== "GET") {
     return false;
   }
 
