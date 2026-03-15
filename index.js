@@ -5,7 +5,7 @@ const { URL } = require("url");
 const crypto = require("crypto");
 
 /* ===============================
-CONTROLLERS
+   CONTROLLERS
 =============================== */
 
 const { handleOrders } = require("./src/controllers/ordersController");
@@ -19,7 +19,7 @@ const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
 
 /* ===============================
-RESPONSE HELPERS
+   RESPONSE HELPERS
 =============================== */
 
 function json(res, status, payload) {
@@ -41,10 +41,11 @@ function badRequest(res, message) {
 }
 
 /* ===============================
-CORS
+   CORS
 =============================== */
 
 function parseAllowedOrigins() {
+
   const raw = String(process.env.CORS_ALLOWED_ORIGINS || "").trim();
 
   if (!raw) {
@@ -65,6 +66,7 @@ function parseAllowedOrigins() {
 const ALLOWED_ORIGINS = parseAllowedOrigins();
 
 function applyCors(req, res) {
+
   const origin = req.headers.origin;
 
   if (origin && ALLOWED_ORIGINS.has(origin)) {
@@ -85,17 +87,24 @@ function applyCors(req, res) {
 }
 
 /* ===============================
-BODY PARSER
+   BODY PARSER
 =============================== */
 
 async function readBody(req) {
+
   let body = "";
-  for await (const chunk of req) body += chunk;
+
+  for await (const chunk of req) {
+    body += chunk;
+  }
+
   return body;
 }
 
 async function readJson(req) {
+
   const raw = await readBody(req);
+
   if (!raw) return {};
 
   try {
@@ -106,7 +115,7 @@ async function readJson(req) {
 }
 
 /* ===============================
-HELPERS
+   HELPERS
 =============================== */
 
 function toLower(v) {
@@ -124,7 +133,7 @@ function clamp(n, min, max) {
 }
 
 /* ===============================
-COURIER PRICING
+   COURIER PRICING
 =============================== */
 
 const COURIER_PRICING = {
@@ -160,6 +169,7 @@ const COURIER_PRICING = {
   },
 
   minimumCharge: 35
+
 };
 
 function buildCourierQuote({
@@ -176,7 +186,8 @@ function buildCourierQuote({
     COURIER_PRICING.regions.default;
 
   const vehiclePricing =
-    regionPricing[vehicle_type] || regionPricing.sedan;
+    regionPricing[vehicle_type] ||
+    regionPricing.sedan;
 
   const distance = clamp(miles, 0, 5000);
 
@@ -212,52 +223,11 @@ function buildCourierQuote({
 
     total: Number(total.toFixed(2))
   };
+
 }
 
 /* ===============================
-NOTARY PRICING
-=============================== */
-
-const NOTARY_PRICING = {
-
-  regions: {
-    texas: { base: 95, extraSignerFee: 20 },
-    oregon: { base: 85, extraSignerFee: 15 },
-    washington: { base: 105, extraSignerFee: 20 },
-    default: { base: 85, extraSignerFee: 15 }
-  }
-
-};
-
-function buildNotaryQuote({ region, signers }) {
-
-  const pricing =
-    NOTARY_PRICING.regions[region] ||
-    NOTARY_PRICING.regions.default;
-
-  const signerCount = clamp(signers, 1, 20);
-
-  const extra =
-    Math.max(0, signerCount - 1) * pricing.extraSignerFee;
-
-  const total = pricing.base + extra;
-
-  return {
-
-    breakdown: {
-      service_type: "notary",
-      region,
-      signers: signerCount,
-      base: pricing.base,
-      extraSigners: extra
-    },
-
-    total: Number(total.toFixed(2))
-  };
-}
-
-/* ===============================
-MAIN ROUTER
+   MAIN ROUTER
 =============================== */
 
 async function handleAPI(req, res, pool) {
@@ -270,70 +240,25 @@ async function handleAPI(req, res, pool) {
   }
 
   const method = req.method;
+
   const parsed = new URL(req.url, `http://${req.headers.host}`);
-  const pathname = parsed.pathname;
+
+  let pathname = parsed.pathname;
+
+  /* Normalize /api prefix so internal routers work */
+  if (pathname.startsWith("/api/")) {
+    pathname = pathname.slice(4);
+  }
 
   try {
 
     /* HEALTH */
 
-    if (pathname === "/api/health" && method === "GET") {
+    if (pathname === "/health" && method === "GET") {
+
       await pool.query("SELECT 1");
+
       return json(res, 200, { status: "ok" });
-    }
-
-    /* COURIER QUOTE */
-
-    if (pathname === "/api/quote" && method === "POST") {
-
-      const body = await readJson(req);
-
-      if (!body.distance_miles) {
-        return badRequest(res, "distance_miles required");
-      }
-
-      const region = toLower(body.region) || "default";
-      const vehicle_type = toLower(body.vehicle_type) || "sedan";
-
-      const quote = buildCourierQuote({
-
-        miles: body.distance_miles,
-        region,
-        vehicle_type,
-
-        fragile: !!body.fragile,
-        priority: !!body.priority,
-        timeSensitive: !!body.timeSensitive
-
-      });
-
-      return json(res, 200, {
-        quote_id: crypto.randomUUID(),
-        ...quote
-      });
-    }
-
-    /* NOTARY QUOTE */
-
-    if (pathname === "/api/notary/quote" && method === "POST") {
-
-      const body = await readJson(req);
-
-      if (!body.signers) {
-        return badRequest(res, "signers required");
-      }
-
-      const region = toLower(body.region) || "default";
-
-      const quote = buildNotaryQuote({
-        region,
-        signers: body.signers
-      });
-
-      return json(res, 200, {
-        quote_id: crypto.randomUUID(),
-        ...quote
-      });
     }
 
     /* DRIVER ROUTES */
