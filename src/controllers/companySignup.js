@@ -2,7 +2,7 @@
 
 async function handleCompanySignup(req, res, pool, pathname, method, json) {
 
-  if (pathname !== "/api/company/signup" || method !== "POST") {
+  if (pathname !== "/company/signup" || method !== "POST") {
     return false;
   }
 
