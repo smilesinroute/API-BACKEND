@@ -1,5 +1,7 @@
 "use strict";
 
+const crypto = require("crypto");
+
 async function handleCompanySignup(req, res, pool, pathname, method, json) {
 
   if (pathname !== "/company/signup" || method !== "POST") {
@@ -36,16 +38,30 @@ async function handleCompanySignup(req, res, pool, pathname, method, json) {
 
     const companyId = companyResult.rows[0].id;
 
-    /* CREATE ADMIN USER */
+    /* CREATE ADMIN */
+
+    const adminResult = await pool.query(
+      `INSERT INTO admins (email, password, company_id)
+       VALUES ($1,$2,$3)
+       RETURNING id`,
+      [email, password, companyId]
+    );
+
+    const adminId = adminResult.rows[0].id;
+
+    /* CREATE SESSION TOKEN */
+
+    const token = crypto.randomBytes(32).toString("hex");
 
     await pool.query(
-      `INSERT INTO admins (email, password, company_id)
-       VALUES ($1,$2,$3)`,
-      [email, password, companyId]
+      `INSERT INTO admin_sessions (admin_id, token)
+       VALUES ($1,$2)`,
+      [adminId, token]
     );
 
     json(res, 200, {
       success: true,
+      token,
       company_id: companyId
     });
 
