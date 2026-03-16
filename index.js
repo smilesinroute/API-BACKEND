@@ -17,7 +17,7 @@ const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
 const { handleDriverOrders } = require("./src/drivers/driverOrders");
 const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
-
+const { handleCompanySignup } = require("./src/controllers/companySignup");
 /* ===============================
    RESPONSE HELPERS
 =============================== */
@@ -268,6 +268,9 @@ async function handleAPI(req, res, pool) {
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
     if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
     if (await handleDriverProof(req, res, pool, pathname, method)) return;
+    /* COMPANY SIGNUP */
+
+if (await handleCompanySignup(req, res, pool, pathname, method, json)) return;
 
     /* ADMIN ROUTES */
 
