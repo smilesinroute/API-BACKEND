@@ -16,7 +16,7 @@ async function handleCompanySignup(req, res, pool, pathname, method, json) {
 
     const data = JSON.parse(body || "{}");
 
-    const company = String(data.company || "").trim();
+    const company = String(data.company_name || "").trim();
     const email = String(data.email || "").trim();
     const password = String(data.password || "").trim();
 
@@ -28,11 +28,11 @@ async function handleCompanySignup(req, res, pool, pathname, method, json) {
     /* CREATE COMPANY */
 
     const companyResult = await pool.query(
-  `INSERT INTO companies(company_name, email)
-   VALUES($1, $2)
-   RETURNING id`,
-  [company, email]
-);
+      `INSERT INTO companies(company_name, email)
+       VALUES($1, $2)
+       RETURNING id`,
+      [company, email]
+    );
 
     const companyId = companyResult.rows[0].id;
 
