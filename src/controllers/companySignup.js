@@ -28,11 +28,11 @@ async function handleCompanySignup(req, res, pool, pathname, method, json) {
     /* CREATE COMPANY */
 
     const companyResult = await pool.query(
-      `INSERT INTO companies (name)
-       VALUES ($1)
-       RETURNING id`,
-      [company]
-    );
+  `INSERT INTO companies(company_name, email)
+   VALUES($1, $2)
+   RETURNING id`,
+  [company, email]
+);
 
     const companyId = companyResult.rows[0].id;
 
