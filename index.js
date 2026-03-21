@@ -19,8 +19,12 @@ const { handleDriverProof } = require("./src/drivers/driverProof");
 
 const { handleCompanySignup } = require("./src/controllers/companySignup");
 
-/* ✅ NEW SaaS */
+/* ===============================
+   SAAS (NEW)
+=============================== */
+
 const saasOrders = require("./src/saas/orders");
+const saasDrivers = require("./src/saas/drivers");
 
 /* ===============================
    RESPONSE HELPERS
@@ -108,6 +112,7 @@ async function handleAPI(req, res, pool) {
   }
 
   try {
+
     /* ===============================
        HEALTH
     =============================== */
@@ -117,7 +122,7 @@ async function handleAPI(req, res, pool) {
     }
 
     /* ===============================
-       DRIVER ROUTES
+       DRIVER APP (mobile drivers)
     =============================== */
     if (await handleDriverLogin(req, res, pool)) return;
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
@@ -131,13 +136,18 @@ async function handleAPI(req, res, pool) {
     if (await handleCompanySignup(req, res, pool, pathname, method, json)) return;
 
     /* ===============================
-       ADMIN (SaaS Dashboard - internal)
+       ADMIN (internal tools)
     =============================== */
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
 
     /* ===============================
-       🚀 SAAS (NEW - ISOLATED)
+       🚀 SAAS API (NEW SYSTEM)
     =============================== */
+
+    // ✅ drivers FIRST
+    if (await saasDrivers(req, res, pathname)) return;
+
+    // ✅ then orders
     if (await saasOrders(req, res, pathname)) return;
 
     /* ===============================
