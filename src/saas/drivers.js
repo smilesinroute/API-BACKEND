@@ -1,70 +1,105 @@
+const pool = require("../db");
+
 module.exports = async function (req, res, pathname) {
 
-  const method = req.method;
+const method = req.method;
 
-  // ✅ IMPORTANT: NO /api HERE
-  if (!pathname.startsWith("/saas/drivers")) return false;
+// ✅ NO /api
+if (!pathname.startsWith("/saas/drivers")) return false;
 
-  try {
+try {
 
-    /* =========================
-       GET DRIVERS
-    ========================= */
-    if (method === "GET") {
 
-      const drivers = [
-        {
-          id: 1,
-          name: "Test Driver",
-          email: "test@driver.com",
-          company_id: 1
-        }
-      ];
+/* =========================
+   COMPANY CONTEXT
+========================= */
 
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(drivers));
+const companyId = req.headers["x-company-id"];
 
-      return true;
+if (!companyId) {
+  res.writeHead(400, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Missing company_id" }));
+  return true;
+}
+
+/* =========================
+   GET DRIVERS
+========================= */
+if (method === "GET") {
+
+  const result = await pool.query(
+    `SELECT id, name, email 
+     FROM drivers 
+     WHERE company_id = $1 
+     ORDER BY created_at DESC`,
+    [companyId]
+  );
+
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(result.rows));
+
+  return true;
+}
+
+/* =========================
+   CREATE DRIVER
+========================= */
+if (method === "POST") {
+
+  let body = "";
+
+  req.on("data", chunk => {
+    body += chunk;
+  });
+
+  req.on("end", async () => {
+
+    try {
+
+      const data = JSON.parse(body || "{}");
+
+      if (!data.name || !data.email) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing fields" }));
+        return;
+      }
+
+      const result = await pool.query(
+        `INSERT INTO drivers (name, email, company_id)
+         VALUES ($1, $2, $3)
+         RETURNING id, name, email`,
+        [data.name, data.email, companyId]
+      );
+
+      res.writeHead(201, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result.rows[0]));
+
+    } catch (err) {
+
+      console.error("Driver POST error:", err);
+
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Insert failed" }));
     }
 
-    /* =========================
-       CREATE DRIVER
-    ========================= */
-    if (method === "POST") {
+  });
 
-      let body = "";
+  return true;
+}
 
-      req.on("data", chunk => {
-        body += chunk;
-      });
+return false;
 
-      req.on("end", () => {
 
-        const data = JSON.parse(body || "{}");
+} catch (err) {
 
-        const newDriver = {
-          id: Date.now(),
-          name: data.name,
-          email: data.email,
-          company_id: data.company_id
-        };
+console.error("Drivers error:", err);
 
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(newDriver));
-      });
+res.writeHead(500, { "Content-Type": "application/json" });
+res.end(JSON.stringify({ error: "Server error" }));
 
-      return true;
-    }
+return true;
 
-    return false;
 
-  } catch (err) {
+}
 
-    console.error("Drivers error:", err);
-
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Server error" }));
-
-    return true;
-  }
 };
