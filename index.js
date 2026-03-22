@@ -18,6 +18,7 @@ const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
 
 const { handleCompanySignup } = require("./src/controllers/companySignup");
+const saasCompany = require("./src/saas/companyLookup");
 
 /* ===============================
    SAAS (NEW)
@@ -141,14 +142,17 @@ async function handleAPI(req, res, pool) {
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
 
     /* ===============================
-       🚀 SAAS API (NEW SYSTEM)
-    =============================== */
+   🚀 SAAS API (NEW SYSTEM)
+=============================== */
 
-    // ✅ drivers FIRST
-    if (await saasDrivers(req, res, pathname)) return;
+// ✅ company FIRST
+if (await saasCompany(req, res, pathname)) return;
 
-    // ✅ then orders
-    if (await saasOrders(req, res, pathname)) return;
+// ✅ drivers
+if (await saasDrivers(req, res, pathname)) return;
+
+// ✅ orders
+if (await saasOrders(req, res, pathname)) return;
 
     /* ===============================
        PUBLIC COMPANY WEBSITE
