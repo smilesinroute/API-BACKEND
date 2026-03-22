@@ -4,28 +4,28 @@ module.exports = async function saasOrders(req, res, pathname) {
 
 const method = req.method;
 
-// ✅ NO /api
+// =========================
+// ROUTE CHECK
+// =========================
 if (!pathname.startsWith("/saas/orders")) return false;
 
 const parts = pathname.split("/").filter(Boolean);
-// ["saas", "orders"]
 
 try {
 
 
-/* =========================
-   COMPANY CONTEXT
-========================= */
-
+// =========================
+// COMPANY CONTEXT
+// =========================
 const companyId = req.headers["x-company-id"];
 
 if (!companyId) {
   return sendJSON(res, 400, { error: "Missing company_id" });
 }
 
-/* =========================
-   GET ALL ORDERS
-========================= */
+// =========================
+// GET ALL ORDERS
+// =========================
 if (method === "GET" && parts.length === 2) {
 
   const result = await pool.query(
@@ -39,9 +39,9 @@ if (method === "GET" && parts.length === 2) {
   return sendJSON(res, 200, result.rows);
 }
 
-/* =========================
-   CREATE ORDER (OPTIONAL NEXT STEP)
-========================= */
+// =========================
+// CREATE ORDER
+// =========================
 if (method === "POST" && parts.length === 2) {
 
   let body = "";
@@ -66,9 +66,10 @@ if (method === "POST" && parts.length === 2) {
           delivery_address,
           customer_name,
           customer_phone,
-          company_id
+          company_id,
+          status
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, 'pending')
         RETURNING id, pickup_address, delivery_address, status`,
         [
           data.pickup_address,
@@ -93,6 +94,9 @@ if (method === "POST" && parts.length === 2) {
   return true;
 }
 
+// =========================
+// NOT HANDLED
+// =========================
 return false;
 
 
@@ -107,10 +111,9 @@ return sendJSON(res, 500, { error: "Internal server error" });
 
 };
 
-/* =========================
-HELPER
-========================= */
-
+// =========================
+// HELPER
+// =========================
 function sendJSON(res, status, data) {
 res.writeHead(status, { "Content-Type": "application/json" });
 res.end(JSON.stringify(data));

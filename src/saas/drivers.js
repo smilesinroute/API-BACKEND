@@ -4,27 +4,26 @@ module.exports = async function (req, res, pathname) {
 
 const method = req.method;
 
-// ✅ NO /api
+// =========================
+// ROUTE CHECK
+// =========================
 if (!pathname.startsWith("/saas/drivers")) return false;
 
 try {
 
 
-/* =========================
-   COMPANY CONTEXT
-========================= */
-
+// =========================
+// COMPANY CONTEXT
+// =========================
 const companyId = req.headers["x-company-id"];
 
 if (!companyId) {
-  res.writeHead(400, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ error: "Missing company_id" }));
-  return true;
+  return sendJSON(res, 400, { error: "Missing company_id" });
 }
 
-/* =========================
-   GET DRIVERS
-========================= */
+// =========================
+// GET DRIVERS
+// =========================
 if (method === "GET") {
 
   const result = await pool.query(
@@ -35,15 +34,12 @@ if (method === "GET") {
     [companyId]
   );
 
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(result.rows));
-
-  return true;
+  return sendJSON(res, 200, result.rows);
 }
 
-/* =========================
-   CREATE DRIVER
-========================= */
+// =========================
+// CREATE DRIVER
+// =========================
 if (method === "POST") {
 
   let body = "";
@@ -59,9 +55,7 @@ if (method === "POST") {
       const data = JSON.parse(body || "{}");
 
       if (!data.name || !data.email) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Missing fields" }));
-        return;
+        return sendJSON(res, 400, { error: "Missing fields" });
       }
 
       const result = await pool.query(
@@ -71,15 +65,13 @@ if (method === "POST") {
         [data.name, data.email, companyId]
       );
 
-      res.writeHead(201, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(result.rows[0]));
+      return sendJSON(res, 201, result.rows[0]);
 
     } catch (err) {
 
       console.error("Driver POST error:", err);
+      return sendJSON(res, 500, { error: "Insert failed" });
 
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Insert failed" }));
     }
 
   });
@@ -87,19 +79,27 @@ if (method === "POST") {
   return true;
 }
 
+// =========================
+// NOT HANDLED
+// =========================
 return false;
 
 
 } catch (err) {
 
+
 console.error("Drivers error:", err);
-
-res.writeHead(500, { "Content-Type": "application/json" });
-res.end(JSON.stringify({ error: "Server error" }));
-
-return true;
+return sendJSON(res, 500, { error: "Server error" });
 
 
 }
 
 };
+
+// =========================
+// HELPER
+// =========================
+function sendJSON(res, status, data) {
+res.writeHead(status, { "Content-Type": "application/json" });
+res.end(JSON.stringify(data));
+}
