@@ -4,55 +4,47 @@ module.exports = async function (req, res, pathname) {
 
 const method = req.method;
 
-// ✅ NO /api
+// =========================
+// ROUTE CHECK
+// =========================
 if (!pathname.startsWith("/saas/company")) return false;
-
 if (method !== "GET") return false;
 
 try {
 
 
-/* =========================
-   GET DOMAIN / HOST
-========================= */
-
+// =========================
+// GET HOST
+// =========================
 const host = req.headers.host;
 
 if (!host) {
-  res.writeHead(400, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ error: "Missing host" }));
-  return true;
+  return sendJSON(res, 400, { error: "Missing host" });
 }
 
-/* =========================
-   TEMP LOCAL FALLBACK
-========================= */
-
+// =========================
+// LOCAL DEVELOPMENT FALLBACK
+// =========================
 if (host.includes("localhost")) {
-
-  const company = {
+  return sendJSON(res, 200, {
     id: 1,
     name: "Local Company"
-  };
-
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(company));
-  return true;
+  });
 }
 
-/* =========================
-   REAL DATABASE LOOKUP
-========================= */
-
+// =========================
+// DATABASE LOOKUP
+// =========================
 const result = await pool.query(
-  "SELECT id, company_name FROM companies WHERE domain = $1 LIMIT 1",
+  `SELECT id, company_name 
+   FROM companies 
+   WHERE domain = $1 
+   LIMIT 1`,
   [host]
 );
 
 if (result.rows.length === 0) {
-  res.writeHead(404, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ error: "Company not found" }));
-  return true;
+  return sendJSON(res, 404, { error: "Company not found" });
 }
 
 const company = {
@@ -60,23 +52,24 @@ const company = {
   name: result.rows[0].company_name
 };
 
-res.writeHead(200, { "Content-Type": "application/json" });
-res.end(JSON.stringify(company));
-
-return true;
+return sendJSON(res, 200, company);
 
 
 } catch (err) {
 
 
 console.error("Company lookup error:", err);
-
-res.writeHead(500, { "Content-Type": "application/json" });
-res.end(JSON.stringify({ error: "Server error" }));
-
-return true;
+return sendJSON(res, 500, { error: "Server error" });
 
 
 }
 
 };
+
+// =========================
+// HELPER
+// =========================
+function sendJSON(res, status, data) {
+res.writeHead(status, { "Content-Type": "application/json" });
+res.end(JSON.stringify(data));
+}
