@@ -4,80 +4,95 @@ const crypto = require("crypto");
 
 async function handleCompanySignup(req, res, pool, pathname, method, json) {
 
-  if (pathname !== "/company/signup" || method !== "POST") {
-    return false;
-  }
+// =========================
+// ROUTE CHECK
+// =========================
+if (pathname !== "/company/signup" || method !== "POST") {
+return false;
+}
 
-  try {
+try {
 
-    let body = "";
 
-    for await (const chunk of req) {
-      body += chunk;
-    }
+// =========================
+// PARSE BODY
+// =========================
+let body = "";
 
-    const data = JSON.parse(body || "{}");
+for await (const chunk of req) {
+  body += chunk;
+}
 
-    const company = String(data.company_name || "").trim();
-    const email = String(data.email || "").trim();
-    const password = String(data.password || "").trim();
+const data = JSON.parse(body || "{}");
 
-    if (!company || !email || !password) {
-      json(res, 400, { error: "Missing fields" });
-      return true;
-    }
+const company = String(data.company_name || "").trim();
+const email = String(data.email || "").trim();
+const password = String(data.password || "").trim();
 
-    /* CREATE COMPANY */
+// =========================
+// VALIDATION
+// =========================
+if (!company || !email || !password) {
+  return json(res, 400, { error: "Missing fields" });
+}
 
-    const companyResult = await pool.query(
-      `INSERT INTO companies(company_name, email)
-       VALUES($1, $2)
-       RETURNING id`,
-      [company, email]
-    );
+// =========================
+// CREATE COMPANY
+// =========================
+const companyResult = await pool.query(
+  `INSERT INTO companies (company_name, email)
+   VALUES ($1, $2)
+   RETURNING id`,
+  [company, email]
+);
 
-    const companyId = companyResult.rows[0].id;
+const companyId = companyResult.rows[0].id;
 
-    /* CREATE ADMIN */
+// =========================
+// CREATE ADMIN
+// =========================
+const adminResult = await pool.query(
+  `INSERT INTO admins (email, password, company_id)
+   VALUES ($1, $2, $3)
+   RETURNING id`,
+  [email, password, companyId]
+);
 
-    const adminResult = await pool.query(
-      `INSERT INTO admins (email, password, company_id)
-       VALUES ($1,$2,$3)
-       RETURNING id`,
-      [email, password, companyId]
-    );
+const adminId = adminResult.rows[0].id;
 
-    const adminId = adminResult.rows[0].id;
+// =========================
+// CREATE SESSION TOKEN
+// =========================
+const token = crypto.randomBytes(32).toString("hex");
 
-    /* CREATE SESSION TOKEN */
+await pool.query(
+  `INSERT INTO admin_sessions (admin_id, token)
+   VALUES ($1, $2)`,
+  [adminId, token]
+);
 
-    const token = crypto.randomBytes(32).toString("hex");
+// =========================
+// RESPONSE
+// =========================
+return json(res, 200, {
+  success: true,
+  token,
+  company_id: companyId
+});
 
-    await pool.query(
-      `INSERT INTO admin_sessions (admin_id, token)
-       VALUES ($1,$2)`,
-      [adminId, token]
-    );
 
-    json(res, 200, {
-      success: true,
-      token,
-      company_id: companyId
-    });
+} catch (err) {
 
-    return true;
 
-  } catch (err) {
+console.error("SIGNUP ERROR:", err);
 
-    console.error("SIGNUP ERROR:", err);
+return json(res, 500, {
+  error: "Signup failed",
+  details: err.message
+});
 
-    json(res, 500, {
-      error: "Signup failed",
-      details: err.message
-    });
 
-    return true;
-  }
+}
 }
 
 module.exports = { handleCompanySignup };
