@@ -18,14 +18,11 @@ const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
 
 const { handleCompanySignup } = require("./src/controllers/companySignup");
-const saasCompany = require("./src/saas/companyLookup");
 
-/* ===============================
-   SAAS (NEW)
-=============================== */
-
-const saasOrders = require("./src/saas/orders");
-const saasDrivers = require("./src/saas/drivers");
+/* ❌ REMOVE SAAS */
+// const saasCompany = require("./src/saas/companyLookup");
+// const saasOrders = require("./src/saas/orders");
+// const saasDrivers = require("./src/saas/drivers");
 
 /* ===============================
    RESPONSE HELPERS
@@ -123,7 +120,7 @@ async function handleAPI(req, res, pool) {
     }
 
     /* ===============================
-       DRIVER APP (mobile drivers)
+       DRIVER APP
     =============================== */
     if (await handleDriverLogin(req, res, pool)) return;
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
@@ -137,28 +134,14 @@ async function handleAPI(req, res, pool) {
     if (await handleCompanySignup(req, res, pool, pathname, method, json)) return;
 
     /* ===============================
-       ADMIN (internal tools)
+       ADMIN
     =============================== */
     if (await handleAdminRoutes(req, res, pool, pathname, method, json)) return;
-
-    /* ===============================
-   🚀 SAAS API (NEW SYSTEM)
-=============================== */
-
-// ✅ company FIRST
-if (await saasCompany(req, res, pathname)) return;
-
-// ✅ drivers
-if (await saasDrivers(req, res, pathname)) return;
-
-// ✅ orders
-if (await saasOrders(req, res, pathname)) return;
 
     /* ===============================
        PUBLIC COMPANY WEBSITE
     =============================== */
     if (await handleOrders(req, res, pool, pathname, method, json)) return;
-
     if (await handleAvailability(req, res, pool, pathname, method, json)) return;
 
     /* ===============================
