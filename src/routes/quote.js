@@ -18,9 +18,15 @@ function isNonEmptyString(v) {
   return typeof v === "string" && v.trim().length > 0;
 }
 
-function toNumber(v, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+function pricingNumber(pricing, field) {
+  const value = pricing[field];
+  const n = Number(value);
+  if ((typeof value !== "number" && typeof value !== "string") ||
+      (typeof value === "string" && !value.trim()) ||
+      !Number.isFinite(n) || n < 0) {
+    throw new Error(`Quote pricing is not configured: ${field}`);
+  }
+  return n;
 }
 
 function readJson(req) {
@@ -46,20 +52,30 @@ function readJson(req) {
 ====================================================== */
 
 async function getPricingFor(pool, region, serviceType, vehicleType) {
+  // The customer portal calls the approved Oregon Standard service "Sedan".
+  // Keep the amounts in pricing_config so edits apply to the next quote.
+  const pricingVehicle = serviceType === "courier" && region === "oregon" &&
+    vehicleType === "sedan" ? "standard" : vehicleType;
+
   const { rows } = await pool.query(
     `
     SELECT *
-    FROM pricing
+    FROM public.pricing_config
     WHERE region = $1
       AND service_type = $2
       AND vehicle_type = $3
-    LIMIT 1
+      AND active = true
+    LIMIT 2
     `,
-    [region, serviceType, vehicleType]
+    [region, serviceType, pricingVehicle]
   );
 
   if (!rows.length) {
-    throw new Error("No pricing rule found");
+    throw new Error("No active pricing rule found for this region and vehicle");
+  }
+
+  if (rows.length !== 1) {
+    throw new Error("Multiple active pricing rules found for this region and vehicle");
   }
 
   return rows[0];
@@ -105,8 +121,14 @@ async function handleQuote(req, res, pool, pathname, method, json) {
       vehicleType
     );
 
-    let baseFee = toNumber(pricing.base_fee, 0);
-    let perMile = toNumber(pricing.rate_per_mile, 0);
+    const baseFee = pricingNumber(pricing, "base_rate");
+    const perMile = pricingNumber(pricing, "per_mile_rate");
+    const fragile = body.fragile ? pricingNumber(pricing, "fragile_fee") : 0;
+    const priority = body.priority ? pricingNumber(pricing, "priority_fee") : 0;
+    const timeSensitive = body.timeSensitive
+      ? pricingNumber(pricing, "time_sensitive_fee") : 0;
+    const afterHours = body.afterHours
+      ? pricingNumber(pricing, "after_hours_fee") : 0;
     let distance = 0;
 
     /* ================= COURIER DISTANCE ================= */
@@ -120,22 +142,6 @@ async function handleQuote(req, res, pool, pathname, method, json) {
     let total = baseFee + distance * perMile;
 
     /* ================= ADD-ONS ================= */
-
-    const fragile = body.fragile
-      ? toNumber(pricing.fragile_fee, 0)
-      : 0;
-
-    const priority = body.priority
-      ? toNumber(pricing.priority_fee, 0)
-      : 0;
-
-    const timeSensitive = body.timeSensitive
-      ? toNumber(pricing.time_sensitive_fee, 0)
-      : 0;
-
-    const afterHours = body.afterHours
-      ? toNumber(pricing.after_hours_fee, 0)
-      : 0;
 
     total += fragile + priority + timeSensitive + afterHours;
 

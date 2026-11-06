@@ -69,6 +69,21 @@ Request fields: `serviceType` (`courier`), `region`, `vehicleType`, `pickupAddre
 
 All pricing is calculated server-side using the stored rates and Google driving distance. Client-supplied distance or total fields are not used for quoting. The response includes `ok`, `distance`, `total`, and a `breakdown` with `baseFee`, `perMile`, `mileageCost`, and the selected add-on fees. The frontend displays these amounts without recalculating mileage charges.
 
+## Changing courier prices
+
+Prices come from `public.pricing_config` on every quote request; they are not cached or hardcoded in the website. After this draft is deployed, authorized operators can change prices in Supabase's Table Editor without redeploying the API or website:
+
+1. Open **Table Editor → pricing_config**.
+2. Filter `service_type = courier`, `region = oregon`, `vehicle_type = standard`, and `active = true`. This is the approved Oregon **Sedan** rate shown in the customer portal.
+3. Edit `base_rate` (base fee), `per_mile_rate` (dollars per mile), `fragile_fee`, or `priority_fee`, then save the row. Use nonnegative dollar amounts, not cents.
+4. Request a new test quote and verify the displayed breakdown and total. The next quote reads the saved amounts; no code change or restart is needed.
+
+Keep exactly one active row for each region, service and pricing vehicle. The API rejects missing or duplicate active rows rather than choosing an arbitrary price. Other regions use their exact vehicle names; there is no automatic global fallback. Cargo Van (`cargo`) still needs a confirmed rate and matching row before it can quote.
+
+`time_sensitive_fee` and `after_hours_fee` are not currently present in the inspected table. Requests selecting those extras will fail clearly until their rates and database fields are configured; they are never silently priced at zero. Base and per-mile rates are required, as are the fees for any selected extras.
+
+This draft only reads pricing. It does not provide a public price-edit endpoint or change existing database rows, permissions, orders, or payments. Editing a production rate intentionally changes new customer quotes, so review a new quote immediately after saving.
+
 Quote regression tests (no live database or Google calls):
 
 ```bash

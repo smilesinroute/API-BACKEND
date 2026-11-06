@@ -35,8 +35,8 @@ const payload = {
 
 // Fixture rates verify the calculation; they do not set business prices.
 const pricing = {
-  base_fee: "25.00",
-  rate_per_mile: "2.25",
+  base_rate: "25.00",
+  per_mile_rate: "2.25",
   fragile_fee: "10.00",
   priority_fee: "20.00",
   time_sensitive_fee: "15.00",
@@ -99,8 +99,10 @@ test("public /api/quote reaches server pricing and returns display amounts", asy
   assert.equal(res.data.breakdown.mileageCost, 10.13);
   assert.equal(res.data.total, 35.13);
   assert.equal(queries.length, 1);
-  assert.match(queries[0].sql, /FROM pricing/);
-  assert.deepEqual(Array.from(queries[0].params), ["oregon", "courier", "sedan"]);
+  assert.match(queries[0].sql, /FROM public\.pricing_config/);
+  assert.match(queries[0].sql, /active = true/);
+  assert.match(queries[0].sql, /LIMIT 2/);
+  assert.deepEqual(Array.from(queries[0].params), ["oregon", "courier", "standard"]);
   assert.equal(google.mock.callCount(), 1);
   assert.equal(res.headers["Access-Control-Allow-Origin"], "https://smilesinroute.delivery");
 });
@@ -148,7 +150,7 @@ test("missing pricing produces an error rather than a zero quote", async (t) => 
   t.mock.method(console, "error", () => {});
   const res = await request(payload, { pool: { query: async () => ({ rows: [] }) } });
   assert.equal(res.statusCode, 500);
-  assert.equal(res.data.error, "No pricing rule found");
+  assert.match(res.data.error, /No active pricing rule found/);
   assert.equal(res.data.total, undefined);
 });
 
@@ -181,4 +183,126 @@ test("existing health route still works", async () => {
   } });
   assert.equal(res.statusCode, 200);
   assert.equal(res.data.status, "ok");
+});
+
+test("existing pricing_config fields work without optional surcharge columns", async (t) => {
+  stubGoogle(t);
+  const row = { base_rate: "25.00", per_mile_rate: "2.25",
+    fragile_fee: "10.00", priority_fee: "15.00" };
+  const res = await request({ ...payload, fragile: true, priority: true }, {
+    pool: { query: async () => ({ rows: [row] }) },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.data.total, 60.13);
+  assert.equal(res.data.breakdown.timeSensitive, 0);
+  assert.equal(res.data.breakdown.afterHours, 0);
+});
+
+test("duplicate active rates cannot silently select a price", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const res = await request(payload, {
+    pool: { query: async () => ({ rows: [pricing, { ...pricing, base_rate: "40" }] }) },
+  });
+  assert.equal(res.statusCode, 500);
+  assert.match(res.data.error, /Multiple active pricing rules/);
+  assert.equal(res.data.total, undefined);
+});
+
+test("missing exact vehicle rate does not substitute another vehicle or region", async (t) => {
+  t.mock.method(console, "error", () => {});
+  let calls = 0;
+  const res = await request({ ...payload, vehicleType: "cargo" }, {
+    pool: { query: async (sql, params) => {
+      calls++;
+      assert.deepEqual(Array.from(params), ["oregon", "courier", "cargo"]);
+      assert.doesNotMatch(sql, /\bOR\b|\bUNION\b/i);
+      return { rows: [] };
+    } },
+  });
+  assert.equal(calls, 1);
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.data.total, undefined);
+});
+
+for (const [field, value, options] of [
+  ["base_rate", undefined, {}],
+  ["base_rate", null, {}],
+  ["base_rate", "", {}],
+  ["base_rate", "invalid", {}],
+  ["per_mile_rate", -1, {}],
+  ["per_mile_rate", Infinity, {}],
+  ["priority_fee", null, { priority: true }],
+  ["fragile_fee", undefined, { fragile: true }],
+  ["time_sensitive_fee", undefined, { timeSensitive: true }],
+  ["after_hours_fee", undefined, { afterHours: true }],
+]) {
+  test(`invalid ${field} (${String(value)}) prevents a quote before Google`, async (t) => {
+    t.mock.method(console, "error", () => {});
+    const network = t.mock.method(global, "fetch", async () => {
+      assert.fail("no external lookup expected for incomplete pricing");
+    });
+    const res = await request({ ...payload, ...options }, {
+      pool: { query: async () => ({ rows: [{ ...pricing, [field]: value }] }) },
+    });
+    assert.equal(res.statusCode, 500);
+    assert.equal(res.data.error, `Quote pricing is not configured: ${field}`);
+    assert.equal(res.data.total, undefined);
+    assert.equal(network.mock.callCount(), 0);
+  });
+}
+
+test("explicitly configured zero surcharge remains valid", async (t) => {
+  stubGoogle(t);
+  const res = await request({ ...payload, priority: true }, {
+    pool: { query: async () => ({ rows: [{ ...pricing, priority_fee: "0" }] }) },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.data.breakdown.priority, 0);
+  assert.equal(res.data.total, 35.13);
+});
+
+test("editing stored rates changes the next quote without changing code", async (t) => {
+  stubGoogle(t);
+  let currentRate = { ...pricing };
+  let calls = 0;
+  const pool = { query: async (_, params) => {
+    calls++;
+    assert.deepEqual(Array.from(params), ["oregon", "courier", "standard"]);
+    return { rows: [currentRate] };
+  } };
+  const before = await request(payload, { pool });
+  currentRate = { ...pricing, base_rate: "30.00", per_mile_rate: "3.00" };
+  const after = await request(payload, { pool });
+  assert.equal(before.data.total, 35.13);
+  assert.equal(after.data.breakdown.baseFee, 30);
+  assert.equal(after.data.breakdown.perMile, 3);
+  assert.equal(after.data.breakdown.mileageCost, 13.5);
+  assert.equal(after.data.total, 43.5);
+  assert.equal(calls, 2);
+});
+
+test("stored extra fees can be changed without changing code", async (t) => {
+  stubGoogle(t);
+  let currentRate = { ...pricing, fragile_fee: "10.00", priority_fee: "15.00" };
+  const pool = { query: async () => ({ rows: [currentRate] }) };
+  const selected = { ...payload, fragile: true, priority: true };
+  const before = await request(selected, { pool });
+  currentRate = { ...currentRate, fragile_fee: "12.00", priority_fee: "18.00" };
+  const after = await request(selected, { pool });
+  assert.equal(before.data.total, 60.13);
+  assert.equal(after.data.breakdown.fragile, 12);
+  assert.equal(after.data.breakdown.priority, 18);
+  assert.equal(after.data.total, 65.13);
+});
+
+test("Oregon Sedan mapping does not change another region's vehicle", async (t) => {
+  stubGoogle(t);
+  const res = await request({ ...payload, region: "washington" }, {
+    pool: { query: async (_, params) => {
+      assert.deepEqual(Array.from(params), ["washington", "courier", "sedan"]);
+      return { rows: [pricing] };
+    } },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.data.vehicleType, "sedan");
 });
