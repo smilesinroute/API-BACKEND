@@ -8,6 +8,7 @@ const { URL } = require("url");
 =============================== */
 
 const { handleOrders } = require("./src/controllers/ordersController");
+const { handleQuote } = require("./src/routes/quote");
 const { handleAvailability } = require("./src/controllers/availabilityController");
 const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 
@@ -117,6 +118,11 @@ async function handleAPI(req, res, pool) {
     if (pathname === "/health" && method === "GET") {
       await pool.query("SELECT 1");
       return json(res, 200, { status: "ok" });
+    }
+
+    // The quote handler expects the full public path, including /api.
+    if (parsed.pathname === "/api/quote" && method === "POST") {
+      return await handleQuote(req, res, pool, parsed.pathname, method, json);
     }
 
     /* ===============================

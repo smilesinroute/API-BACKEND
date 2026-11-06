@@ -92,6 +92,12 @@ async function handleQuote(req, res, pool, pathname, method, json) {
       });
     }
 
+    if (serviceType === "courier" && (!pickupAddress || !dropoffAddress)) {
+      return json(res, 400, {
+        error: "pickupAddress and dropoffAddress are required",
+      });
+    }
+
     const pricing = await getPricingFor(
       pool,
       region,
@@ -106,13 +112,6 @@ async function handleQuote(req, res, pool, pathname, method, json) {
     /* ================= COURIER DISTANCE ================= */
 
     if (serviceType === "courier") {
-
-      if (!pickupAddress || !dropoffAddress) {
-        return json(res, 400, {
-          error: "pickupAddress and dropoffAddress are required",
-        });
-      }
-
       distance = await getDistanceMiles(pickupAddress, dropoffAddress);
     }
 
@@ -151,6 +150,7 @@ async function handleQuote(req, res, pool, pathname, method, json) {
       breakdown: {
         baseFee,
         perMile,
+        mileageCost: Number((distance * perMile).toFixed(2)),
         fragile,
         priority,
         timeSensitive,

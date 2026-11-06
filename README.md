@@ -65,7 +65,15 @@ Returns API status.
 
 POST /api/quote
 
-All pricing is calculated server-side.
+Request fields: `serviceType` (`courier`), `region`, `vehicleType`, `pickupAddress`, and `dropoffAddress`. Optional flags: `fragile`, `priority`, `timeSensitive`, and `afterHours`. Vehicle values must match the configured database pricing rows.
+
+All pricing is calculated server-side using the stored rates and Google driving distance. Client-supplied distance or total fields are not used for quoting. The response includes `ok`, `distance`, `total`, and a `breakdown` with `baseFee`, `perMile`, `mileageCost`, and the selected add-on fees. The frontend displays these amounts without recalculating mileage charges.
+
+Quote regression tests (no live database or Google calls):
+
+```bash
+node --test tests/quote.test.js
+```
 
 ---
 
@@ -235,3 +243,4 @@ Update this document whenever:
 * Pricing logic changes
 * Order lifecycle changes
 * Driver workflow changes
+
