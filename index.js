@@ -144,6 +144,9 @@ async function handleAPI(req, res, pool) {
     =============================== */
     if (await handleDriverLogin(req, res, pool)) return;
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
+    if (parsed.pathname === "/api/driver/orders" && method === "GET") {
+      return await handleDriverOrders(req, res, pool, parsed.pathname, method);
+    }
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
     if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
     if (await handleDriverProof(req, res, pool, pathname, method)) return;

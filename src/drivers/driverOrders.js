@@ -1,6 +1,7 @@
 "use strict";
 
 const { json, requireDriver } = require("../lib/driverAuth");
+const { verifyDriverAccess } = require("../lib/driverAccess");
 
 /* ======================================================
    HELPERS
@@ -52,11 +53,28 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
   ====================================================== */
 
   if (pathname === "/api/driver/orders" && method === "GET") {
-
-    const session = await getSession(pool, req, res, { requireSelfie: true });
-    if (!session) return true;
+    res.setHeader("Cache-Control", "no-store");
+    const access = await verifyDriverAccess(req);
+    if (!access.email) {
+      json(res, access.status, { ok: false, error: access.error });
+      return true;
+    }
 
     try {
+      const { rows: drivers } = await pool.query(
+        `SELECT id, active, status, selfie_verified FROM drivers WHERE lower(email) = $1 LIMIT 2`,
+        [access.email]
+      );
+      const [driver] = drivers;
+      if (drivers.length !== 1 || driver.active !== true || driver.status === "inactive") {
+        json(res, 403, { ok: false, error: "This Cloudflare account is not registered as an active driver." });
+        return true;
+      }
+      if (driver.selfie_verified !== true) {
+        json(res, 403, { ok: false, error: "Dispatch must verify your driver selfie before your jobs are available." });
+        return true;
+      }
+
       const { rows } = await pool.query(
         `
         SELECT
@@ -69,19 +87,12 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           scheduled_time,
           created_at
         FROM orders
-        WHERE
-          (
-            assigned_driver_id = $1
-            AND status IN ('assigned','en_route')
-          )
-          OR (
-            assigned_driver_id IS NULL
-            AND status = 'ready_for_dispatch'
-            AND payment_status = 'paid'
-          )
+        WHERE assigned_driver_id = $1
+          AND service_type = 'courier'
+          AND status IN ('assigned', 'en_route', 'in_progress')
         ORDER BY created_at ASC
         `,
-        [session.driver_id]
+        [driver.id]
       );
 
       json(res, 200, {
