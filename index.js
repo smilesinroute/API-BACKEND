@@ -125,6 +125,15 @@ async function handleAPI(req, res, pool) {
       return await handleQuote(req, res, pool, parsed.pathname, method, json);
     }
 
+    // Pass full paths only to these public operations. Order reads/status/payment
+    // mutations remain private and are not exposed by this routing repair.
+    if (parsed.pathname === "/api/schedule" && method === "GET") {
+      return await handleAvailability(req, res, pool, parsed.pathname, method, json);
+    }
+    if (parsed.pathname === "/api/orders" && method === "POST") {
+      return await handleOrders(req, res, pool, parsed.pathname, method, json);
+    }
+
     /* ===============================
        DRIVER APP
     =============================== */
@@ -166,3 +175,4 @@ async function handleAPI(req, res, pool) {
 }
 
 module.exports = { handleAPI };
+

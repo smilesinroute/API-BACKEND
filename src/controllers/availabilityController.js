@@ -1,67 +1,18 @@
 "use strict";
 
-/**
- * Canonical Availability Controller
- * ---------------------------------
- * Supports:
- *   GET /api/schedule?date=YYYY-MM-DD
- *   GET /api/v1/availability?date=YYYY-MM-DD
- *
- * Always returns:
- *   { availableSlots: ["09:00", "10:00", ...] }
- */
-
-const url = require("url");
-
-/* ======================================================
-   STATIC TIME SLOT GENERATOR
-   (Safe production default)
-====================================================== */
-function generateSlots() {
-  return [
-    "08:00",
-    "09:00",
-    "10:00",
-    "11:00",
-    "12:00",
-    "13:00",
-    "14:00",
-    "15:00",
-    "16:00",
-    "17:00",
-  ];
-}
+const { URL } = require("node:url");
+const { getCourierSchedule } = require("../lib/courierSchedule");
 
 async function handleAvailability(req, res, pool, pathname, method, json) {
-  if (method !== "GET") return false;
-
-  /* ======================================================
-     SUPPORT BOTH ROUTES
-  ====================================================== */
-  if (
-    pathname !== "/api/schedule" &&
-    pathname !== "/api/v1/availability"
-  ) {
-    return false;
-  }
-
+  if (method !== "GET" || !["/api/schedule", "/api/v1/availability"].includes(pathname)) return false;
   try {
-    const { query } = url.parse(req.url, true);
-    const date = String(query.date || "");
-
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return json(res, 400, {
-        error: "Invalid or missing date (YYYY-MM-DD required)",
-      });
+    const query = new URL(req.url, "http://localhost").searchParams;
+    if (query.has("region") && query.get("region") !== "oregon") {
+      return json(res, 400, { error: "Online appointment requests are currently available for Oregon only." });
     }
-
-    // TODO: Replace with real driver availability logic
-    const availableSlots = generateSlots();
-
-    return json(res, 200, { availableSlots });
-  } catch (err) {
-    console.error("[AVAILABILITY ERROR]", err);
-    return json(res, 500, { error: "Availability error" });
+    return json(res, 200, getCourierSchedule(query.get("date")));
+  } catch (error) {
+    return json(res, error.statusCode || 500, { error: error.statusCode ? error.message : "Unable to load pickup windows." });
   }
 }
 

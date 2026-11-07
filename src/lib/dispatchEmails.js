@@ -1,6 +1,12 @@
 "use strict";
 
 const { sendMail } = require("./mailer");
+const { WINDOWS, TIME_ZONE } = require("./courierSchedule");
+
+function pickupLabel(order) {
+  const window = order.requested_window || WINDOWS.find(slot => slot.value === String(order.scheduled_time || "").slice(0, 5));
+  return `${order.scheduled_date} · ${window?.label || order.scheduled_time} (${TIME_ZONE})`;
+}
 
 /* ======================================================
    INTERNAL TIMEOUT WRAPPER
@@ -41,11 +47,14 @@ ${order.pickup_address}
 Delivery:
 ${order.delivery_address}
 
-Scheduled:
-${order.scheduled_date} at ${order.scheduled_time}
+Requested pickup window:
+${pickupLabel(order)}
 
 Total:
 $${Number(order.total_amount).toFixed(2)}
+
+Details for dispatch review:
+${order.notes || "No additional arrival instructions."}
 
 Order ID:
 ${order.id}
@@ -72,8 +81,8 @@ ${order.pickup_address}
 Delivery:
 ${order.delivery_address}
 
-Scheduled:
-${order.scheduled_date} at ${order.scheduled_time}
+Approved pickup window:
+${pickupLabel(order)}
 
 Total:
 $${Number(order.total_amount).toFixed(2)}
@@ -92,3 +101,4 @@ module.exports = {
   sendDispatchNotification,
   sendCustomerPaymentLink,
 };
+
