@@ -100,5 +100,15 @@ Once payment is received, dispatch will assign your driver.
 module.exports = {
   sendDispatchNotification,
   sendCustomerPaymentLink,
+  sendNotaryDispatchNotification,
 };
+
+async function sendNotaryDispatchNotification(order) {
+  if (!process.env.DISPATCH_EMAIL) throw new Error("Missing DISPATCH_EMAIL env variable");
+  return withTimeout(sendMail({
+    to: process.env.DISPATCH_EMAIL,
+    subject: `New mobile notary request #${order.id}`,
+    text: `A mobile notary appointment and quote have been requested.\n\nAppointment address:\n${order.pickup_address}\n\n${order.notes}\n\nRequest reference: ${order.id}\n\nNo payment has been collected and no appointment is confirmed.`,
+  }), 5_000, "Notary dispatch email");
+}
 
