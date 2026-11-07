@@ -9,6 +9,7 @@ const { URL } = require("url");
 
 const { handleOrders } = require("./src/controllers/ordersController");
 const { handleQuote } = require("./src/routes/quote");
+const { handleNotary } = require("./src/controllers/notaryController");
 const { handleAvailability } = require("./src/controllers/availabilityController");
 const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 
@@ -132,6 +133,10 @@ async function handleAPI(req, res, pool) {
     }
     if (parsed.pathname === "/api/orders" && method === "POST") {
       return await handleOrders(req, res, pool, parsed.pathname, method, json);
+    }
+    if ((parsed.pathname === "/api/notary/schedule" && method === "GET") ||
+        (parsed.pathname === "/api/notary/requests" && method === "POST")) {
+      return await handleNotary(req, res, pool, parsed.pathname, method, json);
     }
 
     /* ===============================

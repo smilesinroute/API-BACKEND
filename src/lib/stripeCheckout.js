@@ -43,6 +43,21 @@ async function createPaymentSession(order) {
     );
   }
 
+  let lineItems = [{ price_data: { currency: "usd", product_data: {
+    name: `Courier Service – Order ${order.id.slice(0, 8)}`,
+  }, unit_amount: amountCents }, quantity: 1 }];
+  let options;
+  if (order.service_type === "notary") {
+    const quote = require("./notaryQuote").savedQuote(order);
+    lineItems = [
+      ["Mobile notary fees", quote.notaryFeeCents],
+      ["Notary travel fee", quote.travelFeeCents],
+    ].filter(([, cents]) => cents > 0).map(([name, cents]) => ({
+      price_data: { currency: "usd", product_data: { name }, unit_amount: cents }, quantity: 1,
+    }));
+    options = { idempotencyKey: `notary:${order.id}:${quote.quoteRevision}`, timeout: 15000, maxNetworkRetries: 0 };
+  }
+
   /* ---------- Create checkout session ---------- */
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
@@ -50,18 +65,7 @@ async function createPaymentSession(order) {
 
     customer_email: order.customer_email || undefined,
 
-    line_items: [
-      {
-        price_data: {
-          currency: "usd",
-          product_data: {
-            name: `Courier Service – Order ${order.id.slice(0, 8)}`,
-          },
-          unit_amount: amountCents,
-        },
-        quantity: 1,
-      },
-    ],
+    line_items: lineItems,
 
     /* Critical for webhook reconciliation */
     metadata: {
@@ -70,7 +74,7 @@ async function createPaymentSession(order) {
 
     success_url: successUrl,
     cancel_url: cancelUrl,
-  });
+  }, options);
 
   console.log(
     `[STRIPE] Checkout session created for order ${order.id}`
