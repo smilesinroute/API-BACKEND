@@ -259,3 +259,18 @@ Update this document whenever:
 * Order lifecycle changes
 * Driver workflow changes
 
+
+
+## Draft: appointment-only courier requests
+
+Oregon courier appointment requests operate Monday–Friday, 9 AM–6 PM in `America/Los_Angeles`. Customers request one of three windows: 9 AM–12 PM, 12–3 PM, or 3–6 PM. These are preferences requiring dispatch confirmation, not live driver availability or guaranteed reservations. Weekends, past dates, and same-day windows that have already started are excluded; validation runs again on submission. Calendar dates and daylight saving use Pacific time. No holiday or special-closure calendar is implemented in this draft.
+
+`GET /api/schedule?date=YYYY-MM-DD&region=oregon` returns the policy, window labels and start/end values. `POST /api/orders` accepts courier requests with contact details, addresses, each stop's `locationType` (`house`, `apartment`, `business`, `other`), business name/other description where required, optional unit/arrival instructions, pickup date/window start, and optional same-day delivery deadline by 6 PM Pacific. The browser's displayed total must match a fresh server quote; mismatches return 409 without creating an order.
+
+The API stores an unpaid `pending_admin_review` order using existing columns. `scheduled_time` holds the window's start; readable `notes` retain its end, Pacific timezone, customer phone, location categories, business names and arrival instructions. The current schema uses a PostgreSQL `time` column, so a window label is never inserted as a time value. Location notes are returned by the authenticated admin dashboard API and included in dispatch notifications when `DISPATCH_EMAIL` is configured. Notification failure does not erase or fail an already-saved request. The customer receives a reference and an awaiting-confirmation screen; the submission endpoint neither charges a card nor creates a Stripe payment session.
+
+The routing repair exposes only the public schedule GET and order-creation POST. Public order-list/detail reads, status updates and manual payment routes remain inaccessible. No schema migration, permission change or live record creation is required for these code changes.
+
+Validation: `node --test tests/quote.test.js tests/scheduling.test.js tests/courier-request.test.js`. Tests exercise the real public handlers with isolated database, Maps and email fixtures. Actual dispatch email delivery and the existing admin approval/Stripe webhook workflow still require separate integration verification; no live emails or payments were used for draft testing.
+
+Deploy the reviewed API change before its companion customer-portal change. Netlify preview calls to the production API do not exercise this unmerged backend; use the isolated workflow verification and screenshots for draft review. Cargo Van and time-sensitive fee configuration remain separate pricing prerequisites; this draft does not invent rates or expand CORS.

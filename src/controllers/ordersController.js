@@ -1,5 +1,7 @@
 "use strict";
 
+const { createCourierRequest } = require("../lib/courierRequest");
+
 /*
 Orders Controller
 =================
@@ -44,12 +46,23 @@ function readJson(req) {
   return new Promise((resolve, reject) => {
 
     let data = "";
+    let tooLarge = false;
+    let size = 0;
 
     req.on("data", chunk => {
+      if (tooLarge) return;
+      size += Buffer.byteLength(chunk);
+      if (size > 16384) {
+        tooLarge = true;
+        data = "";
+        reject(Object.assign(new Error("Request details are too large."), { statusCode: 413 }));
+        return;
+      }
       data += chunk;
     });
 
     req.on("end", () => {
+      if (tooLarge) return;
       try {
         resolve(data ? JSON.parse(data) : {});
       } catch {
@@ -113,80 +126,32 @@ async function handleOrders(req, res, pool, pathname, method, json) {
 
   if (method === "POST" && parts.length === 2) {
 
-    const body = await readJson(req);
-
-    const email = String(body.customer_email || "")
-      .trim()
-      .toLowerCase();
-
-    if (!isValidEmail(email)) {
-      return json(res, 400, {
-        error: "Valid customer_email is required"
+    try {
+      const body = await readJson(req);
+      const order = await createCourierRequest(pool, body);
+      // A notification problem must not turn a saved request into a failed
+      // submission. The pending request remains visible in the admin queue.
+      if (process.env.DISPATCH_EMAIL) {
+        try {
+          require("../lib/dispatchEmails").sendDispatchNotification(order)
+            .catch(error => console.error("[REQUEST NOTIFICATION]", error.message));
+        } catch (error) {
+          console.error("[REQUEST NOTIFICATION]", error.message);
+        }
+      }
+      return json(res, 201, {
+        id: order.id, status: order.status, payment_status: order.payment_status,
+        scheduled_date: order.scheduled_date, scheduled_time: order.scheduled_time,
+        requested_window: order.requested_window, timezone: order.timezone,
+        total_amount: Number(order.total_amount), requiresConfirmation: true,
       });
+    } catch (error) {
+      const status = error.statusCode || (error.message === "Invalid JSON body" ? 400 : 500);
+    if (status >= 500) console.error("[COURIER REQUEST]", error.message);
+      return json(res, status, { error: status === 500
+        ? "Unable to save your request. Please try again or contact dispatch."
+        : error.message });
     }
-
-    if (!body.service_type) {
-      return json(res, 400, {
-        error: "service_type is required"
-      });
-    }
-
-    const totalAmount = toNumber(body.total_amount, 0);
-
-    const { rows } = await pool.query(
-      `
-      INSERT INTO orders (
-        service_type,
-        region,
-        customer_id,
-        customer_name,
-        customer_email,
-        pickup_address,
-        delivery_address,
-        id_address,
-        distance_miles,
-        signers,
-        document_type,
-        vehicle_type,
-        scheduled_date,
-        scheduled_time,
-        total_amount,
-        notes,
-        pricing_breakdown,
-        status,
-        payment_status
-      )
-      VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-        'pending_admin_review',
-        'unpaid'
-      )
-      RETURNING *
-      `,
-      [
-        body.service_type,
-        body.region || null,
-        body.customer_id || null,
-        body.customer_name || null,
-        email,
-        body.pickup_address || null,
-        body.delivery_address || null,
-        body.id_address || null,
-        toNumber(body.distance_miles, 0),
-        body.signers || null,
-        body.document_type || null,
-        body.vehicle_type || null,
-        body.scheduled_date || null,
-        body.scheduled_time || null,
-        totalAmount,
-        body.notes || null,
-        body.pricing_breakdown
-          ? JSON.stringify(body.pricing_breakdown)
-          : null
-      ]
-    );
-
-    return json(res, 201, rows[0]);
   }
 
   /* ======================================================

@@ -85,16 +85,7 @@ async function getPricingFor(pool, region, serviceType, vehicleType) {
    MAIN HANDLER
 ====================================================== */
 
-async function handleQuote(req, res, pool, pathname, method, json) {
-
-  if (pathname !== "/api/quote" || method !== "POST") {
-    return false;
-  }
-
-  try {
-
-    const body = await readJson(req);
-
+async function calculateQuote(pool, body) {
     const serviceType = String(body.serviceType || "").trim();
     const region = String(body.region || "").trim();
     const vehicleType = String(body.vehicleType || "car").trim();
@@ -103,15 +94,11 @@ async function handleQuote(req, res, pool, pathname, method, json) {
     const dropoffAddress = String(body.dropoffAddress || "").trim();
 
     if (!isNonEmptyString(serviceType) || !isNonEmptyString(region)) {
-      return json(res, 400, {
-        error: "serviceType and region are required",
-      });
+      throw Object.assign(new Error("serviceType and region are required"), { statusCode: 400 });
     }
 
     if (serviceType === "courier" && (!pickupAddress || !dropoffAddress)) {
-      return json(res, 400, {
-        error: "pickupAddress and dropoffAddress are required",
-      });
+      throw Object.assign(new Error("pickupAddress and dropoffAddress are required"), { statusCode: 400 });
     }
 
     const pricing = await getPricingFor(
@@ -147,7 +134,7 @@ async function handleQuote(req, res, pool, pathname, method, json) {
 
     /* ================= RESPONSE ================= */
 
-    return json(res, 200, {
+    return {
       ok: true,
       serviceType,
       region,
@@ -163,17 +150,32 @@ async function handleQuote(req, res, pool, pathname, method, json) {
         afterHours,
       },
       total: Number(total.toFixed(2)),
-    });
+    };
+
+}
+
+async function handleQuote(req, res, pool, pathname, method, json) {
+
+  if (pathname !== "/api/quote" || method !== "POST") {
+    return false;
+  }
+
+  try {
+
+    const body = await readJson(req);
+
+    return json(res, 200, await calculateQuote(pool, body));
 
   } catch (err) {
 
     console.error("[QUOTE ERROR]", err);
 
-    return json(res, 500, {
+    return json(res, err.statusCode || 500, {
       error: err.message || "Quote calculation failed",
     });
 
   }
 }
 
-module.exports = { handleQuote };
+module.exports = { handleQuote, calculateQuote };
+

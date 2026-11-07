@@ -110,6 +110,7 @@ async function buildDashboardPayload(pool) {
       o.scheduled_time,
       o.total_amount,
       o.pricing_breakdown,
+      o.notes,
       o.assigned_driver_id,
       d.name AS driver_name,
       o.created_at
