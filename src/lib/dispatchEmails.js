@@ -69,6 +69,31 @@ ${order.id}
 ====================================================== */
 
 async function sendCustomerPaymentLink({ to, paymentLink, order }) {
+  if (order.service_type === "notary") {
+    const quote = require("./notaryQuote").savedQuote(order);
+    const dollars = cents => `$${(cents / 100).toFixed(2)}`;
+    const time = order.requested_time?.label || String(order.scheduled_time || "").slice(0, 5);
+    return withTimeout(sendMail({ to, subject: "Your mobile notary quote and payment link", text: `
+Your mobile notary request has been reviewed. Please review these proposed details and fees before paying.
+
+Signing location:
+${order.pickup_address}
+
+Requested appointment:
+${order.scheduled_date} · ${time} (${TIME_ZONE})
+
+Notary fees: ${dollars(quote.notaryFeeCents)}
+Travel fee: ${dollars(quote.travelFeeCents)}
+Total: ${dollars(quote.notaryFeeCents + quote.travelFeeCents)}
+
+If you accept this quote, complete payment at:
+${paymentLink}
+
+For changes or questions, call (971) 236-4669 before paying. Dispatch will finalize appointment arrangements after payment.
+
+Request reference: ${order.id}
+    `.trim() }), 5_000, "Notary quote email");
+  }
   const mailPromise = sendMail({
     to,
     subject: "Your Courier Delivery – Payment Required",

@@ -48,7 +48,7 @@ function parseOrderActionPath(pathname) {
   const action = parts[3];
 
   if (!isNonEmptyString(orderId)) return null;
-  if (!["approve", "reject", "assign"].includes(action)) return null;
+  if (!["approve", "reject", "assign", "notary-quote"].includes(action)) return null;
 
   return { orderId, action };
 }
@@ -111,6 +111,10 @@ async function buildDashboardPayload(pool) {
       o.total_amount,
       o.pricing_breakdown,
       o.notes,
+      o.signers,
+      o.document_type,
+      o.payment_status,
+      o.stripe_checkout_url,
       o.assigned_driver_id,
       d.name AS driver_name,
       o.created_at
@@ -204,7 +208,7 @@ function readJson(req) {
    ORDER APPROVAL
 ====================================================== */
 
-async function approveOrder(pool, json, res, orderId) {
+async function approveOrder(pool, json, res, orderId, req) {
 
   const order = await loadOrder(pool, orderId);
 
@@ -228,6 +232,18 @@ async function approveOrder(pool, json, res, orderId) {
 
   if (!email) return jsonError(json, res, 400, "Customer email missing");
   if (!total || total <= 0) return jsonError(json, res, 400, "Invalid order total");
+
+  if (order.service_type === "notary") {
+    const { readQuoteBody, approveNotaryQuote } = require("../lib/notaryQuote");
+    const body = await readQuoteBody(req);
+    const approved = await approveNotaryQuote(pool, orderId, body, createPaymentSession);
+    let emailSent = true;
+    try { await sendCustomerPaymentLink({ to: approved.order.customer_email, paymentLink: approved.session.url, order: approved.order }); }
+    catch (error) { emailSent = false; console.error("[NOTARY QUOTE EMAIL]", error.message); }
+    return json(res, 200, { success: true, orderId, email_sent: emailSent,
+      payment_url: approved.session.url,
+      message: emailSent ? "Quote approved and email sent." : "Quote approved, but email delivery could not be confirmed. The saved payment link is available in Awaiting Payment." });
+  }
 
   let session;
 
@@ -273,11 +289,25 @@ async function approveOrder(pool, json, res, orderId) {
 async function rejectOrder(pool, json, res, orderId) {
 
   const { rowCount } = await pool.query(
-    `UPDATE orders SET status = 'rejected' WHERE id = $1`,
+    `UPDATE orders SET status = 'rejected'
+     WHERE id = $1
+       AND (
+         service_type IS DISTINCT FROM 'notary'
+         OR (
+           status IN ('pending_admin_review', 'confirmed_pending_payment')
+           AND (payment_status IS NULL OR payment_status = 'unpaid')
+           AND stripe_session_id IS NULL
+           AND paid_at IS NULL
+           AND assigned_driver_id IS NULL
+         )
+       )`,
     [orderId]
   );
 
   if (!rowCount) {
+    if (await loadOrder(pool, orderId)) {
+      return jsonError(json, res, 409, "This Notary request has moved forward and can no longer be rejected.");
+    }
     return jsonError(json, res, 404, "Order not found");
   }
 
@@ -401,8 +431,15 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
 
       const { orderId, action } = actionMatch;
 
+      if (action === "notary-quote") {
+        const { readQuoteBody, saveNotaryQuote } = require("../lib/notaryQuote");
+        const order = await saveNotaryQuote(pool, orderId, await readQuoteBody(req));
+        json(res, 200, { success: true, order });
+        return true;
+      }
+
       if (action === "approve") {
-        await approveOrder(pool, json, res, orderId);
+        await approveOrder(pool, json, res, orderId, req);
         return true;
       }
 
