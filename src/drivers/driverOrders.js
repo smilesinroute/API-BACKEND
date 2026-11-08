@@ -62,7 +62,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
 
     try {
       const { rows: drivers } = await pool.query(
-        `SELECT id, active, status, selfie_verified FROM drivers WHERE lower(email) = $1 LIMIT 2`,
+        `SELECT id, active, status FROM drivers WHERE lower(email) = $1 LIMIT 2`,
         [access.email]
       );
       const [driver] = drivers;
@@ -70,11 +70,6 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         json(res, 403, { ok: false, error: "This Cloudflare account is not registered as an active driver." });
         return true;
       }
-      if (driver.selfie_verified !== true) {
-        json(res, 403, { ok: false, error: "Dispatch must verify your driver selfie before your jobs are available." });
-        return true;
-      }
-
       const { rows } = await pool.query(
         `
         SELECT
