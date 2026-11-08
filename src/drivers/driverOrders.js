@@ -26,22 +26,6 @@ async function getSession(pool, req, res, opts = {}) {
   }
 }
 
-async function readJson(req) {
-  let body = "";
-
-  for await (const chunk of req) {
-    body += chunk;
-  }
-
-  if (!body) return {};
-
-  try {
-    return JSON.parse(body);
-  } catch {
-    throw new Error("Invalid JSON body");
-  }
-}
-
 /* ======================================================
    DRIVER ORDER ROUTES
 ====================================================== */
@@ -275,52 +259,6 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
 
     } catch (err) {
       console.error("[DRIVER] complete error:", err);
-      json(res, 500, { ok: false, error: "Server error" });
-      return true;
-    }
-  }
-
-  /* ======================================================
-     POST /api/driver/location
-  ====================================================== */
-
-  if (pathname === "/api/driver/location" && method === "POST") {
-
-    const session = await getSession(pool, req, res, { requireSelfie: true });
-    if (!session) return true;
-
-    try {
-      const data = await readJson(req);
-
-      const lat = Number(data.lat);
-      const lng = Number(data.lng);
-
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-        json(res, 400, {
-          ok: false,
-          error: "lat and lng must be numbers"
-        });
-        return true;
-      }
-
-      await pool.query(
-        `
-        INSERT INTO driver_locations (
-          driver_id,
-          latitude,
-          longitude,
-          recorded_at
-        )
-        VALUES ($1,$2,$3,NOW())
-        `,
-        [session.driver_id, lat, lng]
-      );
-
-      json(res, 200, { ok: true });
-      return true;
-
-    } catch (err) {
-      console.error("[DRIVER] location error:", err);
       json(res, 500, { ok: false, error: "Server error" });
       return true;
     }

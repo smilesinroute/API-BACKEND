@@ -16,6 +16,7 @@ const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 const { handleDriverLogin } = require("./src/drivers/driverLogin");
 const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
 const { handleDriverOrders } = require("./src/drivers/driverOrders");
+const { handleDriverLocation } = require("./src/drivers/driverLocation");
 const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
 
@@ -146,6 +147,9 @@ async function handleAPI(req, res, pool) {
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
     if (parsed.pathname === "/api/driver/orders" && method === "GET") {
       return await handleDriverOrders(req, res, pool, parsed.pathname, method);
+    }
+    if (parsed.pathname === "/api/driver/location" && method === "POST") {
+      return await handleDriverLocation(req, res, pool);
     }
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
     if (await handleDriverAssignments(req, res, pool, pathname, method)) return;

@@ -233,6 +233,7 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
     lock,
     [/UPDATE drivers SET active = false, status = 'offline'/, scope],
     [/DELETE FROM driver_sessions WHERE driver_id = \$1/, [id]],
+    [/DELETE FROM dispatch_private\.driver_live_locations WHERE driver_id = \$1/, [id]],
     [/AS open_jobs/, scope, { rows: [deactivated] }],
     commit,
   ]);
@@ -257,7 +258,7 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
   const enableTransaction = () => transaction([
     begin,
     lock,
-    [/UPDATE drivers SET active = true WHERE company_id = \$1 AND id = \$2/, scope],
+    [/UPDATE drivers SET active = true, status = CASE WHEN status = 'inactive' THEN 'offline' ELSE status END WHERE company_id = \$1 AND id = \$2/, scope],
     [/AS open_jobs/, scope, { rows: [enabled] }],
     commit,
   ]);
