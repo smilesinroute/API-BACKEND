@@ -131,11 +131,7 @@ async function updateDriver(req, pool, method) {
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
           throw rosterError(409, "This driver needs a valid sign-in email.");
         }
-        try {
-          await allowDriverLogin(config, email);
-        } catch {
-          throw rosterError(502, "Cloudflare did not confirm login access. Try Enable login again.");
-        }
+        await allowDriverLogin(config, email);
         await client.query("UPDATE drivers SET active = true WHERE company_id = $1 AND id = $2", scope);
       } else {
         await client.query(
