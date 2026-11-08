@@ -2,6 +2,7 @@
 
 const { json, requireDriver } = require("../lib/driverAuth");
 const { verifyDriverAccess } = require("../lib/driverAccess");
+const { formatDriverCompanyId } = require("../lib/driverCompanyId");
 
 /* ======================================================
    HELPERS
@@ -46,7 +47,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
 
     try {
       const { rows: drivers } = await pool.query(
-        `SELECT id, active, status FROM drivers WHERE lower(email) = $1 LIMIT 2`,
+        `SELECT id, active, status, driver_number::text AS driver_number FROM drivers WHERE lower(email) = $1 LIMIT 2`,
         [access.email]
       );
       const [driver] = drivers;
@@ -76,7 +77,8 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
 
       json(res, 200, {
         ok: true,
-        orders: rows
+        orders: rows,
+        driver_code: formatDriverCompanyId(driver.driver_number)
       });
 
       return true;

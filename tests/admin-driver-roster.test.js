@@ -83,7 +83,7 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
       const [name, email, phone, vehicle_type, companyId] = params;
       assert.equal(companyId, 1);
       if (drivers.some((driver) => driver.email.toLowerCase() === email)) return { rows: [] };
-      const driver = { id: "sample-driver", name, email, phone, vehicle_type, active: false, status: "offline" };
+      const driver = { id: "sample-driver", driver_number: "1", name, email, phone, vehicle_type, active: false, status: "offline" };
       drivers.push(driver);
       return { rows: [driver] };
     },
@@ -148,6 +148,7 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
   assert.equal(created.status, 201);
   assert.equal(created.payload.driver.email, "driver@example.test");
   assert.equal(created.payload.driver.active, false);
+  assert.equal(created.payload.driver.driver_code, "SIR-0001");
   assert.equal((await request("POST", token, fields)).status, 409);
 
   const roster = await request("GET", token);
@@ -234,7 +235,7 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
     [/UPDATE drivers SET active = false, status = 'offline'/, scope],
     [/DELETE FROM driver_sessions WHERE driver_id = \$1/, [id]],
     [/DELETE FROM dispatch_private\.driver_live_locations WHERE driver_id = \$1/, [id]],
-    [/AS open_jobs/, scope, { rows: [deactivated] }],
+    [/AS open_jobs/, scope, { rows: [{ ...deactivated, driver_number: "1" }] }],
     commit,
   ]);
   assert.deepEqual((await request("PATCH", token, { id }, removal)).payload, { driver: deactivated });
@@ -259,7 +260,7 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
     begin,
     lock,
     [/UPDATE drivers SET active = true, status = CASE WHEN status = 'inactive' THEN 'offline' ELSE status END WHERE company_id = \$1 AND id = \$2/, scope],
-    [/AS open_jobs/, scope, { rows: [enabled] }],
+    [/AS open_jobs/, scope, { rows: [{ ...enabled, driver_number: "1" }] }],
     commit,
   ]);
   assert.deepEqual((await request("PUT", token, { id, email: "other@example.test" }, enableTransaction())).payload, { driver: enabled });
