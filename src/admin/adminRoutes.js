@@ -395,6 +395,12 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return false;
     }
 
+    if (pathname === "/admin/drivers" && (method === "GET" || method === "POST")) {
+      const { handleDriverRoster } = require("./driverRoster");
+      await handleDriverRoster(req, res, pool, method, json);
+      return true;
+    }
+
     if (pathname === "/admin/dashboard" && method === "GET") {
 
       requireAdmin(req);
