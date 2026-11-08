@@ -2,11 +2,13 @@
 
 const { verifyCloudflareAccess } = require("../lib/driverAccess");
 const { allowDriverLogin, driverLoginListConfig } = require("./driverLoginList");
+const { bucketName, photoPrefix, handleDriverRecordPhoto } = require("./driverRecordPhoto");
 
 // The dispatch portal manages the Smiles In Route company in this database.
 const companyId = 1;
 const columns = "id, name, email, phone, vehicle_type, status, active, selfie_verified";
 const vehicles = new Set(["car", "cargo_van"]);
+const driverIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const unusedDriver = `
   d.selfie_verified IS NOT TRUE
   AND d.selfie_image_url IS NULL
@@ -16,6 +18,10 @@ const unusedDriver = `
   AND NOT EXISTS (SELECT 1 FROM driver_selfies WHERE driver_id = d.id)
   AND NOT EXISTS (SELECT 1 FROM driver_locations WHERE driver_id = d.id)
   AND NOT EXISTS (SELECT 1 FROM driver_sessions WHERE driver_id = d.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM storage.objects
+    WHERE bucket_id = '${bucketName}' AND name = '${photoPrefix}' || d.id::text || '.jpg'
+  )
 `;
 const rosterColumns = `
   ${columns},
@@ -95,7 +101,7 @@ async function readDriver(req) {
 
 async function updateDriver(req, pool, method) {
   const { id } = (await readRosterBody(req)) ?? {};
-  if (typeof id !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+  if (typeof id !== "string" || !driverIdPattern.test(id)) {
     throw rosterError(400, "Select a valid driver.");
   }
 
@@ -159,6 +165,12 @@ async function updateDriver(req, pool, method) {
 async function handleDriverRoster(req, res, pool, method, json) {
   res.setHeader("Cache-Control", "no-store");
   await requireRosterManager(req);
+
+  const photoId = new URL(req.url || "/admin/drivers", "http://localhost").searchParams.get("photo");
+  if (photoId !== null) {
+    if (!driverIdPattern.test(photoId)) throw rosterError(400, "Select a valid driver.");
+    return handleDriverRecordPhoto(req, res, pool, [companyId, photoId], method, json);
+  }
 
   if (method === "GET") {
     const { rows } = await pool.query(

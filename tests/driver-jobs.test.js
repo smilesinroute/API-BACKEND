@@ -71,7 +71,8 @@ test("driver jobs route checks Cloudflare identity and returns only assigned cou
   const drivers = new Map([
     ["one@example.test", { id: "driver-one", active: true, selfie_verified: true }],
     ["two@example.test", { id: "driver-two", active: true, selfie_verified: true }],
-    ["pending@example.test", { id: "driver-pending", active: true, selfie_verified: false }],
+    ["new@example.test", { id: "driver-new", active: true, selfie_verified: false }],
+    ["inactive@example.test", { id: "driver-inactive", active: false }],
   ]);
   const pool = {
     async query(sql, [value]) {
@@ -80,7 +81,8 @@ test("driver jobs route checks Cloudflare identity and returns only assigned cou
       }
       assert.match(sql, /WHERE assigned_driver_id = \$1\s+AND service_type = 'courier'/);
       assert.doesNotMatch(sql, /assigned_driver_id IS NULL/);
-      assert.notEqual(value, "driver-pending");
+      assert.notEqual(value, "driver-inactive");
+      if (value === "driver-new") return { rows: [{ id: "new-driver-job" }] };
       return { rows: value === "driver-one" ? [{ id: "sample-job" }] : [] };
     },
   };
@@ -90,7 +92,10 @@ test("driver jobs route checks Cloudflare identity and returns only assigned cou
   assert.equal(assigned.headers["Cache-Control"], "no-store");
   assert.deepEqual(assigned.body.orders, [{ id: "sample-job" }]);
   assert.deepEqual((await withEmail("two@example.test")).body.orders, []);
-  assert.equal((await withEmail("pending@example.test")).statusCode, 403);
+  const newDriver = await withEmail("new@example.test");
+  assert.equal(newDriver.statusCode, 200);
+  assert.deepEqual(newDriver.body.orders, [{ id: "new-driver-job" }]);
+  assert.equal((await withEmail("inactive@example.test")).statusCode, 403);
   assert.equal((await withEmail("unregistered@example.test")).statusCode, 403);
   assert.equal((await request(deniedPool, {}, "/api/driver/order/sample-job/start", "POST")).statusCode, 404);
 });

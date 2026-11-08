@@ -89,16 +89,23 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
     },
   };
 
-  async function request(method, token, body, connection = pool) {
+  async function request(method, token, body, connection = pool, photoId) {
     const req = new PassThrough();
     req.headers = token ? { "cf-access-jwt-assertion": token } : { authorization: "Bearer sample-admin-key" };
-    req.end(typeof body === "string" ? body : JSON.stringify(body ?? {}));
+    if (photoId !== undefined) {
+      req.url = "/admin/drivers?photo=" + encodeURIComponent(photoId);
+      if (method === "PUT") req.headers["content-type"] = "image/jpeg";
+    }
+    req.end(typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body ?? {}));
     const headers = {};
     let output;
     try {
       await handleDriverRoster(
         req,
-        { setHeader: (name, value) => { headers[name] = value; } },
+        {
+          setHeader: (name, value) => { headers[name] = value; },
+          end(payload) { output = { status: this.statusCode, payload, headers }; },
+        },
         connection,
         method,
         (_res, status, payload) => { output = { status, payload, headers }; }
@@ -174,6 +181,46 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
   const begin = [/^BEGIN$/, undefined];
   const commit = [/^COMMIT$/, undefined];
   const rollback = [/^ROLLBACK$/, undefined];
+  const photo = Buffer.from([0xff, 0xd8, 0xff, 0x01, 0xff, 0xd9]);
+  const record = { rowCount: 1, rows: [{ id }] };
+  const photoLock = [/WHERE company_id = \$1 AND id = \$2 FOR SHARE/, scope, record];
+  const photoPath = "driver-records/" + id + ".jpg";
+  const storageModule = require.resolve("../src/lib/supabase");
+  let savedPhoto;
+  require.cache[storageModule] = { exports: { supabase: { storage: { from(bucket) {
+    assert.equal(bucket, "driver-documents");
+    return {
+      async upload(path, bytes, options) {
+        assert.equal(path, photoPath);
+        assert.equal(options.upsert, true);
+        savedPhoto = bytes;
+        return { error: null };
+      },
+      async download(path) {
+        assert.equal(path, photoPath);
+        if (!savedPhoto) return { error: { error: "NoSuchKey" } };
+        return { data: new Blob([savedPhoto]), error: null };
+      },
+    };
+  } } } } };
+  t.after(() => { delete require.cache[storageModule]; });
+
+  const photoPool = { async query(sql, params) {
+    assert.match(sql, /WHERE company_id = \$1 AND id = \$2/);
+    assert.deepEqual(params, scope);
+    return record;
+  } };
+  assert.equal((await request("GET", sign(manager, driverAudience), null, noDataAccess, id)).status, 401);
+  assert.equal((await request("PUT", sign("driver@example.test"), photo, noDataAccess, id)).status, 403);
+  assert.equal((await request("PUT", token, "not a photo", noDataAccess, id)).status, 400);
+  assert.equal((await request("GET", token, null, noDataAccess, "../../bad")).status, 400);
+  assert.equal((await request("GET", token, null, photoPool, id)).status, 404);
+  assert.equal((await request("PUT", token, photo, transaction([begin, photoLock, commit]), id)).status, 200);
+  const storedPhoto = await request("GET", token, null, photoPool, id);
+  assert.equal(storedPhoto.status, 200);
+  assert.equal(storedPhoto.headers["Cache-Control"], "no-store");
+  assert.equal(storedPhoto.headers["Content-Type"], "image/jpeg");
+  assert.deepEqual(storedPhoto.payload, photo);
   const lock = [/SELECT id, email FROM drivers WHERE company_id = \$1 AND id = \$2 FOR UPDATE/, scope, {
     rowCount: 1, rows: [{ id, email: "Driver@Example.Test" }],
   }];
