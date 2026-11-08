@@ -14,7 +14,8 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
   const manager = "manager@example.test";
   const account = "0123456789abcdef0123456789abcdef";
   const list = "01234567-89ab-cdef-0123-456789abcdef";
-  const listUrl = `https://api.cloudflare.com/client/v4/accounts/${account}/gateway/lists/${list}`;
+  const listsUrl = `https://api.cloudflare.com/client/v4/accounts/${account}/gateway/lists`;
+  const listUrl = `${listsUrl}/${list}`;
   const listToken = "sample-list-api-token";
   const env = {
     ADMIN_ACCESS_ISSUER: issuer,
@@ -38,6 +39,7 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
   const kid = "sample-access-key";
   let listMode = "append";
   let listName = "Smiles In Route Driver Login";
+  let discoveredLists = [];
   const listCalls = [];
   t.mock.method(global, "fetch", async (url, options) => {
     if (url === issuer + "/cdn-cgi/access/certs") {
@@ -46,6 +48,9 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
     assert.equal(options.headers.Authorization, `Bearer ${listToken}`);
     const method = options.method || "GET";
     listCalls.push([method, url]);
+    if (url === listsUrl && method === "GET") {
+      return Response.json({ success: true, result: discoveredLists });
+    }
     if (url === listUrl && method === "GET") {
       return Response.json({ success: true, result: { type: "EMAIL", name: listName } });
     }
@@ -218,5 +223,21 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
 
   listName = "Admin Login";
   assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 502);
-  assert.deepEqual(listCalls, [["GET", listUrl]]);
+  assert.deepEqual(listCalls.splice(0), [["GET", listUrl]]);
+
+  delete process.env.CLOUDFLARE_DRIVER_EMAIL_LIST_ID;
+  assert.equal((await request("GET", token)).payload.login_setup_available, true);
+  listMode = "append";
+  const driverList = { id: list, name: "Smiles In Route Driver Login", type: "EMAIL" };
+  discoveredLists = [{ id: list, name: "Admin Login", type: "EMAIL" }, driverList];
+  assert.equal((await request("PUT", token, { id }, enableTransaction())).status, 200);
+  assert.deepEqual(listCalls.splice(0), [["GET", listsUrl], ["PATCH", listUrl]]);
+
+  discoveredLists = [driverList, { ...driverList, id: "98765432-89ab-cdef-0123-456789abcdef" }];
+  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 502);
+  assert.deepEqual(listCalls.splice(0), [["GET", listsUrl]]);
+
+  discoveredLists = [];
+  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 502);
+  assert.deepEqual(listCalls, [["GET", listsUrl]]);
 });
