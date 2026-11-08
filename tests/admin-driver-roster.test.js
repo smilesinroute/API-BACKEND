@@ -7,7 +7,7 @@ const test = require("node:test");
 const jwt = require("jsonwebtoken");
 const { handleDriverRoster } = require("../src/admin/driverRoster");
 
-test("only configured admins can list and add inactive drivers", async (t) => {
+test("only configured admins can list, add, remove, and delete drivers", async (t) => {
   const issuer = "https://test.cloudflareaccess.com";
   const audience = "test-admin-app";
   const driverAudience = "test-driver-app";
@@ -43,7 +43,7 @@ test("only configured admins can list and add inactive drivers", async (t) => {
       if (sql.startsWith("SELECT")) {
         assert.match(sql, /WHERE company_id = \$1/);
         assert.deepEqual(params, [1]);
-        return { rows: [...drivers] };
+        return { rows: drivers.map((driver) => ({ ...driver, open_jobs: 0, can_delete: true })) };
       }
       assert.match(sql, /'offline', false, false/);
       assert.match(sql, /lower\(email\) = \$2/);
@@ -78,13 +78,16 @@ test("only configured admins can list and add inactive drivers", async (t) => {
     }
   }
 
-  const noDataAccess = { query: () => assert.fail("Unauthorized request reached the database") };
+  const denyQuery = () => assert.fail("Rejected request reached the database");
+  const noDataAccess = { query: denyQuery, connect: denyQuery };
   const token = sign(manager);
   assert.equal((await request("GET", undefined, null, noDataAccess)).status, 401);
   assert.equal((await request("POST", sign(manager, "other-app"), {}, noDataAccess)).status, 401);
   assert.equal((await request("GET", sign(manager, driverAudience), null, noDataAccess)).status, 401);
   assert.equal((await request("POST", sign(manager, driverAudience), {}, noDataAccess)).status, 401);
   assert.equal((await request("POST", sign("driver@example.test"), {}, noDataAccess)).status, 403);
+  assert.equal((await request("PATCH", sign(manager, driverAudience), {}, noDataAccess)).status, 401);
+  assert.equal((await request("DELETE", sign("driver@example.test"), {}, noDataAccess)).status, 403);
   process.env.ADMIN_ACCESS_AUDIENCE = driverAudience;
   assert.equal((await request("POST", sign(manager, driverAudience), {}, noDataAccess)).status, 503);
   delete process.env.ADMIN_ACCESS_AUDIENCE;
@@ -110,4 +113,52 @@ test("only configured admins can list and add inactive drivers", async (t) => {
   const roster = await request("GET", token);
   assert.equal(roster.headers["Cache-Control"], "no-store");
   assert.deepEqual(roster.payload.drivers, [created.payload.driver]);
+
+  const id = "a1b2c3d4-1234-1234-1234-123456789abc";
+  assert.equal((await request("PATCH", token, { id: "bad" }, noDataAccess)).status, 400);
+
+  function transaction(steps) {
+    const remaining = [...steps];
+    return {
+      async connect() {
+        return {
+          async query(sql, params) {
+            const step = remaining.shift();
+            assert.ok(step, `Unexpected query: ${sql}`);
+            const [expectedSql, expectedParams, result] = step;
+            assert.match(sql, expectedSql);
+            assert.deepEqual(params, expectedParams);
+            return result;
+          },
+          release() { assert.equal(remaining.length, 0); },
+        };
+      },
+    };
+  }
+
+  const scope = [1, id];
+  const begin = [/^BEGIN$/, undefined];
+  const commit = [/^COMMIT$/, undefined];
+  const rollback = [/^ROLLBACK$/, undefined];
+  const lock = [/SELECT id FROM drivers WHERE company_id = \$1 AND id = \$2 FOR UPDATE/, scope, { rowCount: 1 }];
+  const deactivated = { ...created.payload.driver, id, active: false, open_jobs: 2, can_delete: false };
+  const removal = transaction([
+    begin,
+    lock,
+    [/UPDATE drivers SET active = false, status = 'offline'/, scope],
+    [/DELETE FROM driver_sessions WHERE driver_id = \$1/, [id]],
+    [/AS open_jobs/, scope, { rows: [deactivated] }],
+    commit,
+  ]);
+  assert.deepEqual((await request("PATCH", token, { id }, removal)).payload, { driver: deactivated });
+
+  const deleteSql = /DELETE FROM drivers d WHERE company_id = \$1 AND id = \$2[\s\S]+NOT EXISTS \(SELECT 1 FROM orders WHERE assigned_driver_id = d.id\)[\s\S]+NOT EXISTS \(SELECT 1 FROM order_photos WHERE driver_id = d.id\)/;
+  const used = transaction([begin, lock, [deleteSql, scope, { rowCount: 0 }], rollback]);
+  assert.equal((await request("DELETE", token, { id }, used)).status, 409);
+
+  const unused = transaction([begin, lock, [deleteSql, scope, { rowCount: 1, rows: [{ id }] }], commit]);
+  assert.deepEqual((await request("DELETE", token, { id }, unused)).payload, { id });
+
+  const wrongCompany = transaction([begin, [lock[0], scope, { rowCount: 0 }], rollback]);
+  assert.equal((await request("DELETE", token, { id }, wrongCompany)).status, 404);
 });

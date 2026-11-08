@@ -31,25 +31,10 @@ function newToken() {
  * Reads selfie status from drivers table
  */
 async function createDriverSession(pool, driverId) {
-  const { rows } = await pool.query(
-    `
-    SELECT selfie_verified
-    FROM drivers
-    WHERE id = $1
-    LIMIT 1
-    `,
-    [driverId]
-  );
-
-  if (!rows.length) {
-    throw new Error("Driver not found");
-  }
-
-  const driver = rows[0];
   const token = newToken();
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-  await pool.query(
+  const { rowCount } = await pool.query(
     `
     INSERT INTO driver_sessions (
       driver_id,
@@ -57,11 +42,15 @@ async function createDriverSession(pool, driverId) {
       selfie_completed,
       expires_at
     )
-    VALUES ($1, $2, $3, $4)
+    SELECT id, $2, COALESCE(selfie_verified, false), $3
+    FROM drivers
+    WHERE id = $1 AND active IS TRUE
+    FOR SHARE
     `,
-    [driverId, token, !!driver.selfie_verified, expiresAt]
+    [driverId, token, expiresAt]
   );
 
+  if (!rowCount) return null;
   return token;
 }
 
@@ -90,6 +79,7 @@ async function requireDriver(pool, req, { requireSelfie = true } = {}) {
 
       // Create session automatically
       token = await createDriverSession(pool, rows[0].id);
+      if (!token) throw new Error("Driver inactive");
     } else {
       throw new Error("Missing Authorization token");
     }
