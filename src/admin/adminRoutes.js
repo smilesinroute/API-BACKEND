@@ -82,6 +82,7 @@ function laneForStatus(status) {
     case "paid":
     case "ready_for_dispatch":
     case "assigned":
+    case "en_route":
     case "in_progress":
       return "active";
 
@@ -117,6 +118,7 @@ async function buildDashboardPayload(pool) {
       o.stripe_checkout_url,
       o.assigned_driver_id,
       d.name AS driver_name,
+      o.assigned_driver_id IS NOT NULL AND d.active IS NOT TRUE AS needs_reassignment,
       o.created_at
     FROM orders o
     LEFT JOIN drivers d
@@ -364,9 +366,15 @@ async function assignDriver(pool, json, res, req, orderId) {
       assigned_driver_id = $2,
       status = 'assigned'
     WHERE id = $1
+      AND assigned_driver_id IS NULL
+      AND status IN ('paid', 'ready_for_dispatch')
+      AND EXISTS (SELECT 1 FROM drivers WHERE id = $2 AND active IS TRUE FOR SHARE)
     RETURNING *
   `,[orderId, driverId]);
 
+  if (!rows.length) {
+    return jsonError(json, res, 409, "Order or driver unavailable for assignment");
+  }
   return json(res, 200, rows[0]);
 
 }
@@ -395,7 +403,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return false;
     }
 
-    if (pathname === "/admin/drivers" && (method === "GET" || method === "POST")) {
+    if (pathname === "/admin/drivers" && ["GET", "POST", "PATCH", "DELETE"].includes(method)) {
       const { handleDriverRoster } = require("./driverRoster");
       await handleDriverRoster(req, res, pool, method, json);
       return true;

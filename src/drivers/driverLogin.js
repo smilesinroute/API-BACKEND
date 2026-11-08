@@ -79,18 +79,13 @@ async function handleDriverLogin(req, res, db) {
       [email]
     );
 
-    if (!rows.length) {
+    const token = rows.length ? await createDriverSession(db, rows[0].id) : null;
+    if (!token) {
       return sendJSON(res, 404, {
         ok: false,
         error: "Driver not found"
       });
     }
-
-    /* --------------------------------------------------
-       Create session token
-    -------------------------------------------------- */
-
-    const token = await createDriverSession(db, rows[0].id);
 
     return sendJSON(res, 200, {
       ok: true,

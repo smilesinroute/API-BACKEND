@@ -141,6 +141,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           AND status = 'ready_for_dispatch'
           AND payment_status = 'paid'
           AND assigned_driver_id IS NULL
+          AND EXISTS (SELECT 1 FROM drivers WHERE id = $2 AND active IS TRUE FOR SHARE)
         `,
         [orderId, session.driver_id]
       );
@@ -198,6 +199,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         WHERE id = $1
           AND assigned_driver_id = $2
           AND status = 'assigned'
+          AND EXISTS (SELECT 1 FROM drivers WHERE id = $2 AND active IS TRUE FOR SHARE)
         `,
         [orderId, session.driver_id]
       );
@@ -255,6 +257,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
         WHERE id = $1
           AND assigned_driver_id = $2
           AND status = 'en_route'
+          AND EXISTS (SELECT 1 FROM drivers WHERE id = $2 AND active IS TRUE FOR SHARE)
         `,
         [orderId, session.driver_id]
       );

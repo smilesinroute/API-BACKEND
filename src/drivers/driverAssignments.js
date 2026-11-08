@@ -110,6 +110,7 @@ async function handleDriverAssignments(req, res, pool, pathname, method) {
       WHERE id = $1
         AND status = 'ready_for_dispatch'
         AND assigned_driver_id IS NULL
+        AND EXISTS (SELECT 1 FROM drivers WHERE id = $2 AND active IS TRUE FOR SHARE)
       RETURNING
         id,
         assigned_driver_id,

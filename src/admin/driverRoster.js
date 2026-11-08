@@ -6,6 +6,23 @@ const { verifyCloudflareAccess } = require("../lib/driverAccess");
 const companyId = 1;
 const columns = "id, name, email, phone, vehicle_type, status, active";
 const vehicles = new Set(["car", "cargo_van"]);
+const unusedDriver = `
+  d.selfie_verified IS NOT TRUE
+  AND d.selfie_image_url IS NULL
+  AND d.last_selfie_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM orders WHERE assigned_driver_id = d.id)
+  AND NOT EXISTS (SELECT 1 FROM order_photos WHERE driver_id = d.id)
+  AND NOT EXISTS (SELECT 1 FROM driver_selfies WHERE driver_id = d.id)
+  AND NOT EXISTS (SELECT 1 FROM driver_locations WHERE driver_id = d.id)
+  AND NOT EXISTS (SELECT 1 FROM driver_sessions WHERE driver_id = d.id)
+`;
+const rosterColumns = `
+  ${columns},
+  (${unusedDriver}) AS can_delete,
+  (SELECT count(*)::int FROM orders
+   WHERE assigned_driver_id = d.id
+     AND status NOT IN ('completed', 'delivered', 'rejected', 'cancelled', 'canceled')) AS open_jobs
+`;
 
 function rosterError(statusCode, message) {
   return Object.assign(new Error(message), { statusCode });
@@ -39,7 +56,7 @@ async function requireRosterManager(req) {
   }
 }
 
-async function readDriver(req) {
+async function readRosterBody(req) {
   const chunks = [];
   let length = 0;
   for await (const chunk of req) {
@@ -49,13 +66,15 @@ async function readDriver(req) {
   }
   if (length > 4096) throw rosterError(413, "The driver form is too large.");
 
-  let body;
   try {
-    body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
     throw rosterError(400, "Enter valid driver details.");
   }
+}
 
+async function readDriver(req) {
+  const body = await readRosterBody(req);
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : "";
   const phone = typeof body?.phone === "string" ? body.phone.trim() : "";
@@ -73,16 +92,69 @@ async function readDriver(req) {
   return [name, email, phone, vehicle];
 }
 
+async function removeDriver(req, pool, method) {
+  const { id } = (await readRosterBody(req)) ?? {};
+  if (typeof id !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+    throw rosterError(400, "Select a valid driver.");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const scope = [companyId, id];
+    // Hold the driver row through the history check and session revocation.
+    const driver = await client.query(
+      "SELECT id FROM drivers WHERE company_id = $1 AND id = $2 FOR UPDATE",
+      scope
+    );
+    if (!driver.rowCount) throw rosterError(404, "Driver not found.");
+
+    let result;
+    if (method === "DELETE") {
+      const deleted = await client.query(
+        `DELETE FROM drivers d WHERE company_id = $1 AND id = $2 AND (${unusedDriver}) RETURNING id`,
+        scope
+      );
+      if (!deleted.rowCount) {
+        throw rosterError(409, "This driver has activity on file. Remove access to preserve their history.");
+      }
+      result = { id: deleted.rows[0].id };
+    } else {
+      await client.query(
+        "UPDATE drivers SET active = false, status = 'offline' WHERE company_id = $1 AND id = $2",
+        scope
+      );
+      await client.query("DELETE FROM driver_sessions WHERE driver_id = $1", [id]);
+      const { rows } = await client.query(
+        `SELECT ${rosterColumns} FROM drivers d WHERE company_id = $1 AND id = $2`,
+        scope
+      );
+      result = { driver: rows[0] };
+    }
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function handleDriverRoster(req, res, pool, method, json) {
   res.setHeader("Cache-Control", "no-store");
   await requireRosterManager(req);
 
   if (method === "GET") {
     const { rows } = await pool.query(
-      `SELECT ${columns} FROM drivers WHERE company_id = $1 ORDER BY lower(name), id`,
+      `SELECT ${rosterColumns} FROM drivers d WHERE company_id = $1 ORDER BY lower(name), id`,
       [companyId]
     );
     return json(res, 200, { drivers: rows });
+  }
+
+  if (method === "PATCH" || method === "DELETE") {
+    return json(res, 200, await removeDriver(req, pool, method));
   }
 
   const fields = await readDriver(req);
@@ -95,7 +167,7 @@ async function handleDriverRoster(req, res, pool, method, json) {
     [...fields, companyId]
   );
   if (!rows.length) throw rosterError(409, "A driver with this email already exists.");
-  return json(res, 201, { driver: rows[0] });
+  return json(res, 201, { driver: { ...rows[0], open_jobs: 0, can_delete: true } });
 }
 
 module.exports = { handleDriverRoster };
