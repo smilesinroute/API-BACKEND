@@ -4,7 +4,8 @@ const listName = "Smiles In Route Driver Login";
 const listIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
 function cloudflareListError(message) {
-  return Object.assign(new Error(message), { statusCode: 502 });
+  // Provisioning failed at an external dependency. Keep this separate from proxy 502s.
+  return Object.assign(new Error(message), { statusCode: 424 });
 }
 
 function driverLoginListConfig() {

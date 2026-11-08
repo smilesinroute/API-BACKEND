@@ -219,11 +219,11 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
   assert.deepEqual(listCalls.splice(0), [["GET", listUrl], ["PATCH", listUrl], ["GET", listUrl + "/items"]]);
 
   listMode = "failed";
-  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 502);
+  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 424);
   assert.deepEqual(listCalls.splice(0), [["GET", listUrl], ["PATCH", listUrl], ["GET", listUrl + "/items"]]);
 
   listName = "Admin Login";
-  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 502);
+  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 424);
   assert.deepEqual(listCalls.splice(0), [["GET", listUrl]]);
 
   delete process.env.CLOUDFLARE_DRIVER_EMAIL_LIST_ID;
@@ -235,18 +235,18 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
   assert.deepEqual(listCalls.splice(0), [["GET", listsUrl], ["PATCH", listUrl]]);
 
   discoveredLists = [driverList, { ...driverList, id: "98765432-89ab-cdef-0123-456789abcdef" }];
-  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 502);
+  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 424);
   assert.deepEqual(listCalls.splice(0), [["GET", listsUrl]]);
 
   discoveredLists = [];
   const missingList = await request("PUT", token, { id }, transaction([begin, lock, rollback]));
-  assert.equal(missingList.status, 502);
+  assert.equal(missingList.status, 424);
   assert.match(missingList.message, /exactly one User Emails list/);
   assert.deepEqual(listCalls.splice(0), [["GET", listsUrl]]);
 
   listMode = "denied";
   const denied = await request("PUT", token, { id }, transaction([begin, lock, rollback]));
-  assert.equal(denied.status, 502);
+  assert.equal(denied.status, 424);
   assert.match(denied.message, /Cloudflare rejected the token/);
   assert.ok(!denied.message.includes(listToken));
   assert.deepEqual(listCalls, [["GET", listsUrl]]);
