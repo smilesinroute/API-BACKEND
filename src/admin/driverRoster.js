@@ -138,13 +138,17 @@ async function updateDriver(req, pool, method) {
           throw rosterError(409, "This driver needs a valid sign-in email.");
         }
         await allowDriverLogin(config, email);
-        await client.query("UPDATE drivers SET active = true WHERE company_id = $1 AND id = $2", scope);
+        await client.query(
+          "UPDATE drivers SET active = true, status = CASE WHEN status = 'inactive' THEN 'offline' ELSE status END WHERE company_id = $1 AND id = $2",
+          scope
+        );
       } else {
         await client.query(
           "UPDATE drivers SET active = false, status = 'offline' WHERE company_id = $1 AND id = $2",
           scope
         );
         await client.query("DELETE FROM driver_sessions WHERE driver_id = $1", [id]);
+        await client.query("DELETE FROM dispatch_private.driver_live_locations WHERE driver_id = $1", [id]);
       }
       const { rows } = await client.query(
         `SELECT ${rosterColumns} FROM drivers d WHERE company_id = $1 AND id = $2`,
@@ -166,10 +170,23 @@ async function handleDriverRoster(req, res, pool, method, json) {
   res.setHeader("Cache-Control", "no-store");
   await requireRosterManager(req);
 
-  const photoId = new URL(req.url || "/admin/drivers", "http://localhost").searchParams.get("photo");
+  const params = new URL(req.url || "/admin/drivers", "http://localhost").searchParams;
+  const photoId = params.get("photo");
   if (photoId !== null) {
     if (!driverIdPattern.test(photoId)) throw rosterError(400, "Select a valid driver.");
     return handleDriverRecordPhoto(req, res, pool, [companyId, photoId], method, json);
+  }
+
+  if (method === "GET" && params.get("tracking") === "1") {
+    const { rows } = await pool.query(
+      `SELECT l.driver_id, l.latitude, l.longitude, l.accuracy_m, l.event_at AS recorded_at
+       FROM dispatch_private.driver_live_locations l
+       JOIN public.drivers d ON d.id = l.driver_id
+       WHERE d.company_id = $1 AND d.active IS TRUE AND d.status IS DISTINCT FROM 'inactive'
+         AND l.latitude IS NOT NULL AND l.event_at >= now() - interval '2 minutes'`,
+      [companyId]
+    );
+    return json(res, 200, { locations: rows });
   }
 
   if (method === "GET") {
