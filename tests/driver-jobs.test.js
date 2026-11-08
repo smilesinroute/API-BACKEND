@@ -69,8 +69,8 @@ test("driver jobs route checks Cloudflare identity and returns only assigned cou
   }
 
   const drivers = new Map([
-    ["one@example.test", { id: "driver-one", active: true, selfie_verified: true }],
-    ["two@example.test", { id: "driver-two", active: true, selfie_verified: true }],
+    ["one@example.test", { id: "driver-one", driver_number: "2", active: true, selfie_verified: true }],
+    ["two@example.test", { id: "driver-two", driver_number: "10001", active: true, selfie_verified: true }],
     ["new@example.test", { id: "driver-new", active: true, selfie_verified: false }],
     ["inactive@example.test", { id: "driver-inactive", active: false }],
   ]);
@@ -91,7 +91,10 @@ test("driver jobs route checks Cloudflare identity and returns only assigned cou
   assert.equal(assigned.statusCode, 200);
   assert.equal(assigned.headers["Cache-Control"], "no-store");
   assert.deepEqual(assigned.body.orders, [{ id: "sample-job" }]);
-  assert.deepEqual((await withEmail("two@example.test")).body.orders, []);
+  assert.equal(assigned.body.driver_code, "SIR-0002");
+  const empty = await withEmail("two@example.test");
+  assert.deepEqual(empty.body.orders, []);
+  assert.equal(empty.body.driver_code, "SIR-10001");
   const newDriver = await withEmail("new@example.test");
   assert.equal(newDriver.statusCode, 200);
   assert.deepEqual(newDriver.body.orders, [{ id: "new-driver-job" }]);

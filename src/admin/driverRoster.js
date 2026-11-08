@@ -1,12 +1,13 @@
 "use strict";
 
 const { verifyCloudflareAccess } = require("../lib/driverAccess");
+const { formatDriverCompanyId } = require("../lib/driverCompanyId");
 const { allowDriverLogin, driverLoginListConfig } = require("./driverLoginList");
 const { bucketName, photoPrefix, handleDriverRecordPhoto } = require("./driverRecordPhoto");
 
 // The dispatch portal manages the Smiles In Route company in this database.
 const companyId = 1;
-const columns = "id, name, email, phone, vehicle_type, status, active, selfie_verified";
+const columns = "id, name, email, phone, vehicle_type, status, active, selfie_verified, driver_number::text AS driver_number";
 const vehicles = new Set(["car", "cargo_van"]);
 const driverIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const unusedDriver = `
@@ -33,6 +34,10 @@ const rosterColumns = `
 
 function rosterError(statusCode, message) {
   return Object.assign(new Error(message), { statusCode });
+}
+
+function rosterDriver({ driver_number, ...driver }) {
+  return { ...driver, driver_code: formatDriverCompanyId(driver_number) };
 }
 
 async function requireRosterManager(req) {
@@ -154,7 +159,7 @@ async function updateDriver(req, pool, method) {
         `SELECT ${rosterColumns} FROM drivers d WHERE company_id = $1 AND id = $2`,
         scope
       );
-      result = { driver: rows[0] };
+      result = { driver: rosterDriver(rows[0]) };
     }
     await client.query("COMMIT");
     return result;
@@ -194,7 +199,7 @@ async function handleDriverRoster(req, res, pool, method, json) {
       `SELECT ${rosterColumns} FROM drivers d WHERE company_id = $1 ORDER BY lower(name), id`,
       [companyId]
     );
-    return json(res, 200, { drivers: rows, login_setup_available: !!driverLoginListConfig() });
+    return json(res, 200, { drivers: rows.map(rosterDriver), login_setup_available: !!driverLoginListConfig() });
   }
 
   if (method === "PUT" || method === "PATCH" || method === "DELETE") {
@@ -211,7 +216,7 @@ async function handleDriverRoster(req, res, pool, method, json) {
     [...fields, companyId]
   );
   if (!rows.length) throw rosterError(409, "A driver with this email already exists.");
-  return json(res, 201, { driver: { ...rows[0], open_jobs: 0, can_delete: true } });
+  return json(res, 201, { driver: { ...rosterDriver(rows[0]), open_jobs: 0, can_delete: true } });
 }
 
 module.exports = { handleDriverRoster };
