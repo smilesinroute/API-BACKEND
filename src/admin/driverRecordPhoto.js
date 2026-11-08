@@ -38,8 +38,16 @@ async function handleDriverRecordPhoto(req, res, pool, scope, method, json) {
   const driverQuery = "SELECT id FROM drivers WHERE company_id = $1 AND id = $2";
 
   if (method === "GET") {
-    const driver = await pool.query(driverQuery, scope);
+    const driver = await pool.query(
+      `SELECT d.id, EXISTS (
+        SELECT 1 FROM storage.objects
+        WHERE bucket_id = $3 AND name = $4 || d.id::text || '.jpg'
+      ) AS has_photo
+      FROM drivers d WHERE d.company_id = $1 AND d.id = $2`,
+      [...scope, bucketName, photoPrefix]
+    );
     if (!driver.rowCount) throw photoError(404, "Driver not found.");
+    if (!driver.rows[0].has_photo) throw photoError(404, "No photo on file for this driver.");
     const path = photoPrefix + driver.rows[0].id + ".jpg";
     const { supabase } = require("../lib/supabase");
     const { data, error } = await supabase.storage.from(bucketName).download(path);
