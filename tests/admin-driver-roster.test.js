@@ -9,11 +9,13 @@ const { handleDriverRoster } = require("../src/admin/driverRoster");
 
 test("only configured admins can list and add inactive drivers", async (t) => {
   const issuer = "https://test.cloudflareaccess.com";
-  const audience = "test-access-app";
+  const audience = "test-admin-app";
+  const driverAudience = "test-driver-app";
   const manager = "manager@example.test";
   const env = {
-    DRIVER_ACCESS_ISSUER: issuer,
-    DRIVER_ACCESS_AUDIENCE: audience,
+    ADMIN_ACCESS_ISSUER: issuer,
+    ADMIN_ACCESS_AUDIENCE: audience,
+    DRIVER_ACCESS_AUDIENCE: driverAudience,
     ADMIN_DRIVER_MANAGER_EMAILS: manager,
   };
   for (const [key, value] of Object.entries(env)) {
@@ -80,7 +82,14 @@ test("only configured admins can list and add inactive drivers", async (t) => {
   const token = sign(manager);
   assert.equal((await request("GET", undefined, null, noDataAccess)).status, 401);
   assert.equal((await request("POST", sign(manager, "other-app"), {}, noDataAccess)).status, 401);
+  assert.equal((await request("GET", sign(manager, driverAudience), null, noDataAccess)).status, 401);
+  assert.equal((await request("POST", sign(manager, driverAudience), {}, noDataAccess)).status, 401);
   assert.equal((await request("POST", sign("driver@example.test"), {}, noDataAccess)).status, 403);
+  process.env.ADMIN_ACCESS_AUDIENCE = driverAudience;
+  assert.equal((await request("POST", sign(manager, driverAudience), {}, noDataAccess)).status, 503);
+  delete process.env.ADMIN_ACCESS_AUDIENCE;
+  assert.equal((await request("GET", token, null, noDataAccess)).status, 503);
+  process.env.ADMIN_ACCESS_AUDIENCE = audience;
   delete process.env.ADMIN_DRIVER_MANAGER_EMAILS;
   assert.equal((await request("POST", token, {}, noDataAccess)).status, 503);
   process.env.ADMIN_DRIVER_MANAGER_EMAILS = manager;

@@ -21,14 +21,14 @@ async function getAccessKeys(issuer) {
   return keys;
 }
 
-async function verifyDriverAccess(req) {
-  const issuer = String(process.env.DRIVER_ACCESS_ISSUER || "").trim();
-  const audience = String(process.env.DRIVER_ACCESS_AUDIENCE || "").trim();
+async function verifyCloudflareAccess(req, config) {
+  const issuer = String(config.issuer || "").trim();
+  const audience = String(config.audience || "").trim();
   if (!/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(issuer) || !audience) {
-    return { status: 503, error: "Driver job access is awaiting configuration." };
+    return { status: 503, reason: "configuration" };
   }
 
-  const unauthorized = { status: 401, error: "Sign in through Cloudflare Access to view your jobs." };
+  const unauthorized = { status: 401, reason: "unauthorized" };
   const token = req.headers["cf-access-jwt-assertion"];
   if (typeof token !== "string" || token.length > 8192) return unauthorized;
 
@@ -40,7 +40,7 @@ async function verifyDriverAccess(req) {
   try {
     keys = await getAccessKeys(issuer);
   } catch {
-    return { status: 503, error: "Driver access verification is temporarily unavailable." };
+    return { status: 503, reason: "unavailable" };
   }
 
   const jwk = keys.find((key) => key.kid === kid && key.kty === "RSA");
@@ -57,4 +57,19 @@ async function verifyDriverAccess(req) {
   }
 }
 
-module.exports = { verifyDriverAccess };
+const driverAccessErrors = {
+  configuration: "Driver job access is awaiting configuration.",
+  unauthorized: "Sign in through Cloudflare Access to view your jobs.",
+  unavailable: "Driver access verification is temporarily unavailable.",
+};
+
+async function verifyDriverAccess(req) {
+  const access = await verifyCloudflareAccess(req, {
+    issuer: process.env.DRIVER_ACCESS_ISSUER,
+    audience: process.env.DRIVER_ACCESS_AUDIENCE,
+  });
+  if (access.email) return access;
+  return { status: access.status, error: driverAccessErrors[access.reason] };
+}
+
+module.exports = { verifyCloudflareAccess, verifyDriverAccess };

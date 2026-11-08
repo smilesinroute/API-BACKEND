@@ -1,6 +1,6 @@
 "use strict";
 
-const { verifyDriverAccess } = require("../lib/driverAccess");
+const { verifyCloudflareAccess } = require("../lib/driverAccess");
 
 // The dispatch portal manages the Smiles In Route company in this database.
 const companyId = 1;
@@ -16,15 +16,23 @@ async function requireRosterManager(req) {
     .split(",")
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean);
-  if (!managers.length) throw rosterError(503, "Driver management is awaiting configuration.");
+  const audience = String(process.env.ADMIN_ACCESS_AUDIENCE || "").trim();
+  const driverAudience = String(process.env.DRIVER_ACCESS_AUDIENCE || "").trim();
+  if (!managers.length || !audience || audience === driverAudience) {
+    throw rosterError(503, "Driver management requires a separate Admin Access application.");
+  }
 
-  // The live Admin and Driver hostnames share a Cloudflare Access application.
-  const access = await verifyDriverAccess(req);
+  const access = await verifyCloudflareAccess(req, {
+    issuer: process.env.ADMIN_ACCESS_ISSUER,
+    audience,
+  });
   if (!access.email) {
-    const message = access.status === 401
-      ? "Sign in through Cloudflare Access to manage drivers."
-      : "Admin access verification is temporarily unavailable.";
-    throw rosterError(access.status, message);
+    const errors = {
+      configuration: "Driver management is awaiting Admin Access configuration.",
+      unauthorized: "Sign in through the Admin Cloudflare application to manage drivers.",
+      unavailable: "Admin access verification is temporarily unavailable.",
+    };
+    throw rosterError(access.status, errors[access.reason]);
   }
   if (!managers.includes(access.email)) {
     throw rosterError(403, "Your account does not have permission to manage drivers.");
