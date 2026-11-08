@@ -198,7 +198,7 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
       },
       async download(path) {
         assert.equal(path, photoPath);
-        if (!savedPhoto) return { error: { error: "NoSuchKey" } };
+        assert.ok(savedPhoto, "An empty driver record must not call Storage download");
         return { data: new Blob([savedPhoto]), error: null };
       },
     };
@@ -206,15 +206,18 @@ test("only configured admins can list, add, enable, remove, and delete drivers",
   t.after(() => { delete require.cache[storageModule]; });
 
   const photoPool = { async query(sql, params) {
-    assert.match(sql, /WHERE company_id = \$1 AND id = \$2/);
-    assert.deepEqual(params, scope);
-    return record;
+    assert.match(sql, /FROM storage\.objects/);
+    assert.match(sql, /WHERE d\.company_id = \$1 AND d\.id = \$2/);
+    assert.deepEqual(params, [...scope, "driver-documents", "driver-records/"]);
+    return { rowCount: 1, rows: [{ id, has_photo: Boolean(savedPhoto) }] };
   } };
   assert.equal((await request("GET", sign(manager, driverAudience), null, noDataAccess, id)).status, 401);
   assert.equal((await request("PUT", sign("driver@example.test"), photo, noDataAccess, id)).status, 403);
   assert.equal((await request("PUT", token, "not a photo", noDataAccess, id)).status, 400);
   assert.equal((await request("GET", token, null, noDataAccess, "../../bad")).status, 400);
-  assert.equal((await request("GET", token, null, photoPool, id)).status, 404);
+  assert.deepEqual(await request("GET", token, null, photoPool, id), {
+    status: 404, message: "No photo on file for this driver.",
+  });
   assert.equal((await request("PUT", token, photo, transaction([begin, photoLock, commit]), id)).status, 200);
   const storedPhoto = await request("GET", token, null, photoPool, id);
   assert.equal(storedPhoto.status, 200);
