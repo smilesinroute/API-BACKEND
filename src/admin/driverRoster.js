@@ -1,6 +1,6 @@
 "use strict";
 
-const { verifyCloudflareAccess } = require("../lib/driverAccess");
+const { requireDispatchAdmin } = require("./dispatchAccess");
 const { formatDriverCompanyId } = require("../lib/driverCompanyId");
 const { allowDriverLogin, driverLoginListConfig } = require("./driverLoginList");
 const { bucketName, photoPrefix, handleDriverRecordPhoto } = require("./driverRecordPhoto");
@@ -38,34 +38,6 @@ function rosterError(statusCode, message) {
 
 function rosterDriver({ driver_number, ...driver }) {
   return { ...driver, driver_code: formatDriverCompanyId(driver_number) };
-}
-
-async function requireRosterManager(req) {
-  const managers = String(process.env.ADMIN_DRIVER_MANAGER_EMAILS || "")
-    .split(",")
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean);
-  const audience = String(process.env.ADMIN_ACCESS_AUDIENCE || "").trim();
-  const driverAudience = String(process.env.DRIVER_ACCESS_AUDIENCE || "").trim();
-  if (!managers.length || !audience || audience === driverAudience) {
-    throw rosterError(503, "Driver management requires a separate Admin Access application.");
-  }
-
-  const access = await verifyCloudflareAccess(req, {
-    issuer: process.env.ADMIN_ACCESS_ISSUER,
-    audience,
-  });
-  if (!access.email) {
-    const errors = {
-      configuration: "Driver management is awaiting Admin Access configuration.",
-      unauthorized: "Sign in through the Admin Cloudflare application to manage drivers.",
-      unavailable: "Admin access verification is temporarily unavailable.",
-    };
-    throw rosterError(access.status, errors[access.reason]);
-  }
-  if (!managers.includes(access.email)) {
-    throw rosterError(403, "Your account does not have permission to manage drivers.");
-  }
 }
 
 async function readRosterBody(req) {
@@ -173,7 +145,7 @@ async function updateDriver(req, pool, method) {
 
 async function handleDriverRoster(req, res, pool, method, json) {
   res.setHeader("Cache-Control", "no-store");
-  await requireRosterManager(req);
+  await requireDispatchAdmin(req, "Driver management", "manage drivers");
 
   const params = new URL(req.url || "/admin/drivers", "http://localhost").searchParams;
   const photoId = params.get("photo");

@@ -12,6 +12,7 @@ const { handleQuote } = require("./src/routes/quote");
 const { handleNotary } = require("./src/controllers/notaryController");
 const { handleAvailability } = require("./src/controllers/availabilityController");
 const { handleAdminRoutes } = require("./src/admin/adminRoutes");
+const { handleBusinessRequests } = require("./src/admin/businessRequests");
 
 const { handleDriverLogin } = require("./src/drivers/driverLogin");
 const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
@@ -113,6 +114,7 @@ async function handleAPI(req, res, pool) {
   }
 
   try {
+    if (await handleBusinessRequests(req, res, pool, parsed, json)) return;
 
     /* ===============================
        HEALTH
