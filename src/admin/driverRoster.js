@@ -1,10 +1,11 @@
 "use strict";
 
 const { verifyCloudflareAccess } = require("../lib/driverAccess");
+const { allowDriverLogin, driverLoginListConfig } = require("./driverLoginList");
 
 // The dispatch portal manages the Smiles In Route company in this database.
 const companyId = 1;
-const columns = "id, name, email, phone, vehicle_type, status, active";
+const columns = "id, name, email, phone, vehicle_type, status, active, selfie_verified";
 const vehicles = new Set(["car", "cargo_van"]);
 const unusedDriver = `
   d.selfie_verified IS NOT TRUE
@@ -92,19 +93,24 @@ async function readDriver(req) {
   return [name, email, phone, vehicle];
 }
 
-async function removeDriver(req, pool, method) {
+async function updateDriver(req, pool, method) {
   const { id } = (await readRosterBody(req)) ?? {};
   if (typeof id !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
     throw rosterError(400, "Select a valid driver.");
+  }
+
+  const config = method === "PUT" ? driverLoginListConfig() : null;
+  if (method === "PUT" && !config) {
+    throw rosterError(503, "Driver login needs its one-time Cloudflare setup.");
   }
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const scope = [companyId, id];
-    // Hold the driver row through the history check and session revocation.
+    // Serialize changes to the same driver, including Cloudflare provisioning.
     const driver = await client.query(
-      "SELECT id FROM drivers WHERE company_id = $1 AND id = $2 FOR UPDATE",
+      "SELECT id, email FROM drivers WHERE company_id = $1 AND id = $2 FOR UPDATE",
       scope
     );
     if (!driver.rowCount) throw rosterError(404, "Driver not found.");
@@ -120,11 +126,24 @@ async function removeDriver(req, pool, method) {
       }
       result = { id: deleted.rows[0].id };
     } else {
-      await client.query(
-        "UPDATE drivers SET active = false, status = 'offline' WHERE company_id = $1 AND id = $2",
-        scope
-      );
-      await client.query("DELETE FROM driver_sessions WHERE driver_id = $1", [id]);
+      if (method === "PUT") {
+        const email = driver.rows[0].email?.trim().toLowerCase() ?? "";
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          throw rosterError(409, "This driver needs a valid sign-in email.");
+        }
+        try {
+          await allowDriverLogin(config, email);
+        } catch {
+          throw rosterError(502, "Cloudflare did not confirm login access. Try Enable login again.");
+        }
+        await client.query("UPDATE drivers SET active = true WHERE company_id = $1 AND id = $2", scope);
+      } else {
+        await client.query(
+          "UPDATE drivers SET active = false, status = 'offline' WHERE company_id = $1 AND id = $2",
+          scope
+        );
+        await client.query("DELETE FROM driver_sessions WHERE driver_id = $1", [id]);
+      }
       const { rows } = await client.query(
         `SELECT ${rosterColumns} FROM drivers d WHERE company_id = $1 AND id = $2`,
         scope
@@ -150,11 +169,11 @@ async function handleDriverRoster(req, res, pool, method, json) {
       `SELECT ${rosterColumns} FROM drivers d WHERE company_id = $1 ORDER BY lower(name), id`,
       [companyId]
     );
-    return json(res, 200, { drivers: rows });
+    return json(res, 200, { drivers: rows, login_setup_available: !!driverLoginListConfig() });
   }
 
-  if (method === "PATCH" || method === "DELETE") {
-    return json(res, 200, await removeDriver(req, pool, method));
+  if (method === "PUT" || method === "PATCH" || method === "DELETE") {
+    return json(res, 200, await updateDriver(req, pool, method));
   }
 
   const fields = await readDriver(req);

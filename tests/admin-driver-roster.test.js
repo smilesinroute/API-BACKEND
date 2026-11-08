@@ -7,16 +7,23 @@ const test = require("node:test");
 const jwt = require("jsonwebtoken");
 const { handleDriverRoster } = require("../src/admin/driverRoster");
 
-test("only configured admins can list, add, remove, and delete drivers", async (t) => {
+test("only configured admins can list, add, enable, remove, and delete drivers", async (t) => {
   const issuer = "https://test.cloudflareaccess.com";
   const audience = "test-admin-app";
   const driverAudience = "test-driver-app";
   const manager = "manager@example.test";
+  const account = "0123456789abcdef0123456789abcdef";
+  const list = "01234567-89ab-cdef-0123-456789abcdef";
+  const listUrl = `https://api.cloudflare.com/client/v4/accounts/${account}/gateway/lists/${list}`;
+  const listToken = "sample-list-api-token";
   const env = {
     ADMIN_ACCESS_ISSUER: issuer,
     ADMIN_ACCESS_AUDIENCE: audience,
     DRIVER_ACCESS_AUDIENCE: driverAudience,
     ADMIN_DRIVER_MANAGER_EMAILS: manager,
+    CLOUDFLARE_ACCOUNT_ID: account,
+    CLOUDFLARE_DRIVER_EMAIL_LIST_ID: list,
+    CLOUDFLARE_DRIVER_LIST_TOKEN: listToken,
   };
   for (const [key, value] of Object.entries(env)) {
     const previous = process.env[key];
@@ -29,9 +36,28 @@ test("only configured admins can list, add, remove, and delete drivers", async (
 
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const kid = "sample-access-key";
-  t.mock.method(global, "fetch", async (url) => {
-    assert.equal(url, issuer + "/cdn-cgi/access/certs");
-    return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid }] });
+  let listMode = "append";
+  let listName = "Smiles In Route Driver Login";
+  const listCalls = [];
+  t.mock.method(global, "fetch", async (url, options) => {
+    if (url === issuer + "/cdn-cgi/access/certs") {
+      return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid }] });
+    }
+    assert.equal(options.headers.Authorization, `Bearer ${listToken}`);
+    const method = options.method || "GET";
+    listCalls.push([method, url]);
+    if (url === listUrl && method === "GET") {
+      return Response.json({ success: true, result: { type: "EMAIL", name: listName } });
+    }
+    if (url === listUrl && method === "PATCH") {
+      assert.deepEqual(JSON.parse(options.body), { append: [{ value: "driver@example.test" }] });
+      return Response.json({ success: listMode === "append" });
+    }
+    assert.equal(url, listUrl + "/items");
+    return Response.json({
+      success: true,
+      result: listMode === "retry" ? [{ value: "driver@example.test" }] : [],
+    });
   });
   const sign = (email, aud = audience) => jwt.sign({ email }, privateKey, {
     algorithm: "RS256", keyid: kid, issuer, audience: aud, expiresIn: "5m",
@@ -87,6 +113,7 @@ test("only configured admins can list, add, remove, and delete drivers", async (
   assert.equal((await request("POST", sign(manager, driverAudience), {}, noDataAccess)).status, 401);
   assert.equal((await request("POST", sign("driver@example.test"), {}, noDataAccess)).status, 403);
   assert.equal((await request("PATCH", sign(manager, driverAudience), {}, noDataAccess)).status, 401);
+  assert.equal((await request("PUT", sign(manager, driverAudience), {}, noDataAccess)).status, 401);
   assert.equal((await request("DELETE", sign("driver@example.test"), {}, noDataAccess)).status, 403);
   process.env.ADMIN_ACCESS_AUDIENCE = driverAudience;
   assert.equal((await request("POST", sign(manager, driverAudience), {}, noDataAccess)).status, 503);
@@ -112,6 +139,7 @@ test("only configured admins can list, add, remove, and delete drivers", async (
 
   const roster = await request("GET", token);
   assert.equal(roster.headers["Cache-Control"], "no-store");
+  assert.equal(roster.payload.login_setup_available, true);
   assert.deepEqual(roster.payload.drivers, [created.payload.driver]);
 
   const id = "a1b2c3d4-1234-1234-1234-123456789abc";
@@ -140,7 +168,9 @@ test("only configured admins can list, add, remove, and delete drivers", async (
   const begin = [/^BEGIN$/, undefined];
   const commit = [/^COMMIT$/, undefined];
   const rollback = [/^ROLLBACK$/, undefined];
-  const lock = [/SELECT id FROM drivers WHERE company_id = \$1 AND id = \$2 FOR UPDATE/, scope, { rowCount: 1 }];
+  const lock = [/SELECT id, email FROM drivers WHERE company_id = \$1 AND id = \$2 FOR UPDATE/, scope, {
+    rowCount: 1, rows: [{ id, email: "Driver@Example.Test" }],
+  }];
   const deactivated = { ...created.payload.driver, id, active: false, open_jobs: 2, can_delete: false };
   const removal = transaction([
     begin,
@@ -161,4 +191,32 @@ test("only configured admins can list, add, remove, and delete drivers", async (
 
   const wrongCompany = transaction([begin, [lock[0], scope, { rowCount: 0 }], rollback]);
   assert.equal((await request("DELETE", token, { id }, wrongCompany)).status, 404);
+
+  delete process.env.CLOUDFLARE_DRIVER_LIST_TOKEN;
+  assert.equal((await request("PUT", token, { id }, noDataAccess)).status, 503);
+  assert.equal((await request("GET", token)).payload.login_setup_available, false);
+  process.env.CLOUDFLARE_DRIVER_LIST_TOKEN = listToken;
+
+  const enabled = { ...deactivated, active: true, selfie_verified: false };
+  const enableTransaction = () => transaction([
+    begin,
+    lock,
+    [/UPDATE drivers SET active = true WHERE company_id = \$1 AND id = \$2/, scope],
+    [/AS open_jobs/, scope, { rows: [enabled] }],
+    commit,
+  ]);
+  assert.deepEqual((await request("PUT", token, { id, email: "other@example.test" }, enableTransaction())).payload, { driver: enabled });
+  assert.deepEqual(listCalls.splice(0), [["GET", listUrl], ["PATCH", listUrl]]);
+
+  listMode = "retry";
+  assert.equal((await request("PUT", token, { id }, enableTransaction())).status, 200);
+  assert.deepEqual(listCalls.splice(0), [["GET", listUrl], ["PATCH", listUrl], ["GET", listUrl + "/items"]]);
+
+  listMode = "failed";
+  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 502);
+  assert.deepEqual(listCalls.splice(0), [["GET", listUrl], ["PATCH", listUrl], ["GET", listUrl + "/items"]]);
+
+  listName = "Admin Login";
+  assert.equal((await request("PUT", token, { id }, transaction([begin, lock, rollback]))).status, 502);
+  assert.deepEqual(listCalls, [["GET", listUrl]]);
 });
