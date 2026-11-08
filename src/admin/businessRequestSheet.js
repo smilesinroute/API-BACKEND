@@ -51,8 +51,8 @@ async function writeReport(db, spreadsheetId) {
   const { rows } = await db.query(
     `SELECT number::text, source, kind, status, created_at, requested_date::text,
        stop_count, quote_cents, accepted_at, updated_at
-     FROM dispatch_private.business_requests
-     WHERE company_id = 1 ORDER BY number LIMIT $1`,
+     FROM dispatch_private.business_requests AS requests
+     WHERE company_id = 1 ORDER BY requests.number LIMIT $1`,
     [maxRows]
   );
   if (rows.length >= maxRows) fail(409, "The Business Requests report has reached its 10,000-row limit.");

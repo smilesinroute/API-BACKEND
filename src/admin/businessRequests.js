@@ -165,9 +165,9 @@ async function list(res, pool, json, params) {
     fail(400, "Choose a valid inbox view.");
   }
   const { rows } = await pool.query(
-    `SELECT ${fields} FROM ${table}
+    `SELECT ${fields} FROM ${table} AS requests
      WHERE company_id = $1 AND status = ANY($2::text[]) AND ($3::bigint IS NULL OR number < $3)
-     ORDER BY number DESC LIMIT $4`,
+     ORDER BY requests.number DESC LIMIT $4`,
     [companyId, statuses, before, pageSize + 1]
   );
   const requests = rows.slice(0, pageSize);
