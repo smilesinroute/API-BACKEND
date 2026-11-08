@@ -1,12 +1,13 @@
 "use strict";
 
 const { requireDispatchAdmin } = require("./dispatchAccess");
+const { readSheetStatus, syncBusinessRequestSheet } = require("./businessRequestSheet");
 
 const table = "dispatch_private.business_requests";
 const companyId = 1;
 const pageSize = 25;
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const fields = `id, number::text, kind, company, contact_name, email, phone, details,
+const fields = `id, number::text, kind, source, company, contact_name, email, phone, details,
   service_area, requested_date::text, stop_count, service_type, frequency, expected_volume,
   status, quote_cents, quote_terms, quoted_at, accepted_at, acceptance_note,
   activity, version, created_at, updated_at`;
@@ -64,16 +65,17 @@ function reference(number) {
   return "BR-" + String(number).padStart(4, "0");
 }
 
-async function submit(req, res, pool, json) {
+async function submit(req, res, pool, json, actor = null) {
   const body = await readBody(req);
   if (typeof body.id !== "string" || !uuid.test(body.id) || !["bulk", "contract"].includes(body.kind) || body.website) {
     fail(400, "Enter valid request details.");
   }
   const company = textField(body.company, "Company name", 120);
   const contact = textField(body.contact_name, "Contact name", 100);
-  const email = textField(body.email, "Email", 254).toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, "Enter a valid email address.");
+  const email = textField(body.email, "Email", 254, !actor)?.toLowerCase() ?? "";
   const phone = textField(body.phone, "Phone", 32, false);
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, "Enter a valid email address.");
+  if (actor && !email && !phone) fail(400, "Enter an email address or phone number.");
   const details = textField(body.details, "Request details", 2000);
   const bulk = body.kind === "bulk";
   const serviceType = bulk ? "courier" : body.service_type;
@@ -88,26 +90,31 @@ async function submit(req, res, pool, json) {
     bulk ? requestDate(body.requested_date) : null, bulk ? body.stop_count : null, serviceType,
     bulk ? null : textField(body.frequency, "Service schedule", 150),
     bulk ? null : textField(body.expected_volume, "Expected volume", 100),
+    actor ? "manual" : "public", actor,
   ];
   const { rows } = await pool.query(
     `INSERT INTO ${table} AS existing
       (id, company_id, kind, company, contact_name, email, phone, details, service_area,
-        requested_date, stop_count, service_type, frequency, expected_volume)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        requested_date, stop_count, service_type, frequency, expected_volume, source, updated_by, activity)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+        CASE WHEN $16::text IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(jsonb_build_object(
+          'status', 'new', 'recorded_at', now(), 'recorded_by', $16::text, 'quote_cents', NULL
+        )) END)
       ON CONFLICT (id) DO UPDATE SET id = existing.id
         WHERE (existing.company_id, existing.kind, existing.company, existing.contact_name,
           existing.email, existing.phone, existing.details, existing.service_area,
           existing.requested_date, existing.stop_count, existing.service_type,
-          existing.frequency, existing.expected_volume)
+          existing.frequency, existing.expected_volume, existing.source)
         IS NOT DISTINCT FROM (EXCLUDED.company_id, EXCLUDED.kind, EXCLUDED.company,
           EXCLUDED.contact_name, EXCLUDED.email, EXCLUDED.phone, EXCLUDED.details,
           EXCLUDED.service_area, EXCLUDED.requested_date, EXCLUDED.stop_count,
-          EXCLUDED.service_type, EXCLUDED.frequency, EXCLUDED.expected_volume)
-      RETURNING number::text`,
+          EXCLUDED.service_type, EXCLUDED.frequency, EXCLUDED.expected_volume, EXCLUDED.source)
+      RETURNING ${fields}`,
     values
   );
   if (!rows.length) fail(409, "These details changed after the request was submitted. Start a new request if needed.");
-  return json(res, 201, { reference: reference(rows[0].number) });
+  const receipt = { reference: reference(rows[0].number) };
+  return json(res, 201, actor ? { ...receipt, request: rows[0] } : receipt);
 }
 
 const transitions = {
@@ -175,9 +182,14 @@ async function handleBusinessRequests(req, res, pool, parsed, json) {
   try {
     if (publicRoute && req.method === "POST") {
       await submit(req, res, pool, json);
-    } else if (!publicRoute && (req.method === "GET" || req.method === "PATCH")) {
+    } else if (!publicRoute && ["GET", "POST", "PATCH"].includes(req.method)) {
       const actor = await requireDispatchAdmin(req, "Business requests", "manage business requests");
-      if (req.method === "GET") await list(res, pool, json, parsed.searchParams);
+      if (parsed.searchParams.get("sheets") === "1") {
+        if (req.method === "GET") json(res, 200, await readSheetStatus(pool));
+        else if (req.method === "POST") json(res, 200, await syncBusinessRequestSheet(pool, await readBody(req)));
+        else json(res, 405, { error: "Method not allowed." });
+      } else if (req.method === "GET") await list(res, pool, json, parsed.searchParams);
+      else if (req.method === "POST") await submit(req, res, pool, json, actor);
       else await update(req, res, pool, json, actor);
     } else {
       json(res, 405, { error: "Method not allowed." });
