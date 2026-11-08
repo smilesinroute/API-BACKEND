@@ -403,7 +403,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       return false;
     }
 
-    if (pathname === "/admin/drivers" && ["GET", "POST", "PATCH", "DELETE"].includes(method)) {
+    if (pathname === "/admin/drivers" && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
       const { handleDriverRoster } = require("./driverRoster");
       await handleDriverRoster(req, res, pool, method, json);
       return true;
