@@ -14,6 +14,7 @@ const http = require("http");
 const { Pool } = require("pg");
 
 const { handleAPI } = require("./index");
+const { startBusinessRequestSheetSync } = require("./src/admin/businessRequestSheet");
 const { handleStripeWebhook } = require("./src/webhooks/stripe");
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -67,6 +68,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, "0.0.0.0", async () => {
   console.log(`🚀 Smiles API running on port ${PORT}`);
   console.log(`📊 Health: /api/health`);
+  startBusinessRequestSheetSync(pool);
 
   try {
     await pool.query("SELECT 1");
