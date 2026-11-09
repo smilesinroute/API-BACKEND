@@ -13,12 +13,12 @@ const { handleNotary } = require("./src/controllers/notaryController");
 const { handleAvailability } = require("./src/controllers/availabilityController");
 const { handleAdminRoutes } = require("./src/admin/adminRoutes");
 const { handleBusinessRequests } = require("./src/admin/businessRequests");
+const { handleDispatchOrders } = require("./src/admin/dispatchOrders");
 
 const { handleDriverLogin } = require("./src/drivers/driverLogin");
 const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
 const { handleDriverOrders } = require("./src/drivers/driverOrders");
 const { handleDriverLocation } = require("./src/drivers/driverLocation");
-const { handleDriverAssignments } = require("./src/drivers/driverAssignments");
 const { handleDriverProof } = require("./src/drivers/driverProof");
 
 const { handleCompanySignup } = require("./src/controllers/companySignup");
@@ -115,6 +115,7 @@ async function handleAPI(req, res, pool) {
 
   try {
     if (await handleBusinessRequests(req, res, pool, parsed, json)) return;
+    if (await handleDispatchOrders(req, res, pool, parsed, json)) return;
 
     /* ===============================
        HEALTH
@@ -154,7 +155,6 @@ async function handleAPI(req, res, pool) {
       return await handleDriverLocation(req, res, pool);
     }
     if (await handleDriverOrders(req, res, pool, pathname, method)) return;
-    if (await handleDriverAssignments(req, res, pool, pathname, method)) return;
     if (await handleDriverProof(req, res, pool, pathname, method)) return;
 
     /* ===============================
@@ -170,7 +170,6 @@ async function handleAPI(req, res, pool) {
     /* ===============================
        PUBLIC COMPANY WEBSITE
     =============================== */
-    if (await handleOrders(req, res, pool, pathname, method, json)) return;
     if (await handleAvailability(req, res, pool, pathname, method, json)) return;
 
     /* ===============================
