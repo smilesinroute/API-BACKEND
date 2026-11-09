@@ -1,22 +1,15 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
 const { getNotarySchedule } = require('./notaryRequest');
+const { getDistanceMiles } = require('./distanceMatrix');
+
+const actFeeCents = 1000;
+const travelPerMileCents = 200;
+const travelMinimumCents = 2000;
+const maxActs = 5000;
 
 function error(statusCode, message) {
   return Object.assign(new Error(message), { statusCode });
-}
-function moneyCents(value) {
-  if (
-    typeof value !== 'string' ||
-    !/^(0|[1-9]\d{0,4})(\.\d{1,2})?$/.test(value.trim())
-  ) {
-    throw error(
-      400,
-      'Enter fees in dollars with at most two decimal places, such as 25.00.',
-    );
-  }
-  const [dollars, fraction = ''] = value.trim().split('.');
-  return Number(dollars) * 100 + Number(fraction.padEnd(2, '0'));
 }
 function revision(value) {
   if (value === null) return null;
@@ -71,6 +64,22 @@ function savedQuote(order) {
     );
   }
   revision(quote.quoteRevision);
+  if (quote.notarialActs !== undefined && (
+    !Number.isInteger(quote.notarialActs) ||
+    quote.notarialActs < 1 ||
+    quote.notarialActs > maxActs ||
+    quote.notaryFeeCents !== quote.notarialActs * actFeeCents ||
+    !Number.isFinite(quote.travelMiles) ||
+    quote.travelMiles < 0 ||
+    !Number.isSafeInteger(quote.travelPerMileCents) ||
+    quote.travelPerMileCents <= 0 ||
+    !Number.isSafeInteger(quote.travelMinimumCents) ||
+    quote.travelMinimumCents < 0 ||
+    quote.travelFeeCents !== Math.max(
+      quote.travelMinimumCents,
+      Math.round(quote.travelMiles * quote.travelPerMileCents),
+    )
+  )) throw error(400, 'Save a valid mileage quote before sending a payment link.');
   return quote;
 }
 async function readQuoteBody(req) {
@@ -122,28 +131,52 @@ async function locked(pool, id, action) {
     client.release();
   }
 }
+function verifyQuoteRevision(order, expected) {
+  editable(order);
+  if ((order.pricing_breakdown?.quoteRevision ?? null) !== expected)
+    throw error(409, 'The quote changed. Refresh and review the latest fees.');
+}
 async function saveNotaryQuote(pool, id, body, now = new Date()) {
-  const notaryFeeCents = moneyCents(body.notary_fee);
-  const travelFeeCents = moneyCents(body.travel_fee);
+  const notarialActs = body.notarial_acts;
+  if (!Number.isInteger(notarialActs) || notarialActs < 1 || notarialActs > maxActs)
+    throw error(400, 'Enter the confirmed number of notarial acts (1 to 5,000).');
+  const expected = revision(body.expected_quote_revision);
+  const origin = process.env.NOTARY_TRAVEL_ORIGIN?.trim();
+  if (!origin) throw error(503, 'The notary travel starting point has not been configured.');
+  const { rows: [snapshot] } = await pool.query('SELECT * FROM orders WHERE id = $1', [id]);
+  if (!snapshot) throw error(404, 'Order not found.');
+  verifyQuoteRevision(snapshot, expected);
+  const address = snapshot.pickup_address?.trim();
+  if (!address) throw error(400, 'A signing address is required for a mileage quote.');
+  let travelMiles;
+  try {
+    travelMiles = await getDistanceMiles(origin, address);
+  } catch {
+    throw error(502, 'Could not calculate road mileage. Verify the signing address and try again.');
+  }
+  if (!Number.isFinite(travelMiles) || travelMiles < 0)
+    throw error(502, 'The road mileage could not be verified. Try again.');
+  const notaryFeeCents = notarialActs * actFeeCents;
+  const travelFeeCents = Math.max(travelMinimumCents, Math.round(travelMiles * travelPerMileCents));
   const total = notaryFeeCents + travelFeeCents;
   if (total <= 0 || total > 9999999)
     throw error(
       400,
       'The total must be greater than zero and no more than 99,999.99.',
     );
-  const expected = revision(body.expected_quote_revision);
   return locked(pool, id, async (client, order) => {
-    editable(order);
-    if ((order.pricing_breakdown?.quoteRevision ?? null) !== expected)
-      throw error(
-        409,
-        'The quote changed. Refresh and review the latest fees.',
-      );
+    verifyQuoteRevision(order, expected);
+    if (order.pickup_address?.trim() !== address)
+      throw error(409, 'The signing address changed. Refresh and calculate the quote again.');
     const pricing = {
       ...(order.pricing_breakdown || {}),
       quoteRequired: false,
       notaryFeeCents,
       travelFeeCents,
+      notarialActs,
+      travelMiles,
+      travelPerMileCents,
+      travelMinimumCents,
       quoteRevision: randomUUID(),
       quotedAt: now.toISOString(),
     };
@@ -172,6 +205,8 @@ async function approveNotaryQuote(
         409,
         'The quote changed. Refresh and review the latest fees before sending.',
       );
+    if (quote.notarialActs === undefined)
+      throw error(409, 'Calculate and save the notarial acts and mileage before sending this quote.');
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(order.customer_email || '')))
       throw error(400, 'A valid customer email is required.');
     const date =
@@ -218,7 +253,6 @@ async function approveNotaryQuote(
 }
 
 module.exports = {
-  moneyCents,
   savedQuote,
   readQuoteBody,
   saveNotaryQuote,

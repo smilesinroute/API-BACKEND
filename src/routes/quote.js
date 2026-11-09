@@ -111,7 +111,8 @@ async function calculateQuote(pool, body) {
     const baseFee = pricingNumber(pricing, "base_rate");
     const perMile = pricingNumber(pricing, "per_mile_rate");
     const fragile = body.fragile ? pricingNumber(pricing, "fragile_fee") : 0;
-    const priority = body.priority ? pricingNumber(pricing, "priority_fee") : 0;
+    const priority = body.priority && !body.timeSensitive
+      ? pricingNumber(pricing, "priority_fee") : 0;
     const timeSensitive = body.timeSensitive
       ? pricingNumber(pricing, "time_sensitive_fee") : 0;
     const afterHours = body.afterHours
