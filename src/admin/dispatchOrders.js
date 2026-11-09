@@ -86,12 +86,15 @@ async function assignCourierOrder(pool, orderId, driverId) {
         AND o.status IN ('paid', 'ready_for_dispatch') AND o.assigned_driver_id IS NULL
         AND EXISTS (SELECT 1 FROM public.drivers d
           WHERE d.id = $2 AND d.company_id = $3 AND d.active IS TRUE FOR SHARE)
-      RETURNING o.id`, [orderId, driverId, companyId]
+      RETURNING o.*`, [orderId, driverId, companyId]
   );
-  const [order] = await orderRows(pool, orderId);
+  if (rows.length) return rows[0];
+  const existing = await pool.query(
+    "SELECT * FROM public.orders WHERE id = $1 AND (company_id = $2 OR company_id IS NULL)", [orderId, companyId]
+  );
+  const [order] = existing.rows;
   if (!order) fail(404, "Order not found.");
-  if (!rows.length && (order.assigned_driver_id !== driverId ||
-      !["assigned", "en_route", "in_progress"].includes(order.status))) {
+  if (order.assigned_driver_id !== driverId || !["assigned", "en_route", "in_progress"].includes(order.status)) {
     fail(409, "This order or driver is no longer available for assignment. Refresh the board.");
   }
   return order;
@@ -184,7 +187,11 @@ async function handleDispatchOrders(req, res, pool, parsed, json) {
     else if (req.method === "POST") {
       const body = await readBody(req);
       if (body.action === "create") json(res, 201, { order: await createManualOrder(pool, body, actor) });
-      else if (body.action === "assign") json(res, 200, { order: await assignCourierOrder(pool, body.order_id, body.driver_id) });
+      else if (body.action === "assign") {
+        const assigned = await assignCourierOrder(pool, body.order_id, body.driver_id);
+        const [order] = await orderRows(pool, assigned.id);
+        json(res, 200, { order });
+      }
       else fail(400, "Choose a valid order action.");
     } else fail(405, "Method not allowed.");
   } catch (error) {
@@ -194,4 +201,4 @@ async function handleDispatchOrders(req, res, pool, parsed, json) {
   return true;
 }
 
-module.exports = { handleDispatchOrders };
+module.exports = { handleDispatchOrders, assignCourierOrder };

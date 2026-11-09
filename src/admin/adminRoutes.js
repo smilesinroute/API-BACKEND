@@ -1,6 +1,7 @@
 "use strict";
 
 const { requireAdmin } = require("./adminAuth");
+const { assignCourierOrder } = require("./dispatchOrders");
 const { sendCustomerPaymentLink } = require("../lib/dispatchEmails");
 const { createPaymentSession } = require("../lib/stripeCheckout");
 
@@ -324,58 +325,8 @@ async function rejectOrder(pool, json, res, orderId) {
 async function assignDriver(pool, json, res, req, orderId) {
 
   const body = await readJson(req);
-  const driverId = String(body.driver_id || "").trim();
-
-  if (!driverId) {
-    return jsonError(json, res, 400, "driver_id is required");
-  }
-
-  const order = await loadOrder(pool, orderId);
-
-  if (!order) {
-    return jsonError(json, res, 404, "Order not found");
-  }
-
-  if (!["paid","ready_for_dispatch"].includes(order.status)) {
-
-    return jsonError(
-      json,
-      res,
-      409,
-      `Order cannot be assigned from status '${order.status}'`
-    );
-
-  }
-
-  if (order.assigned_driver_id) {
-    return jsonError(json, res, 409, "Order already assigned");
-  }
-
-  const driverCheck = await pool.query(
-    `SELECT id FROM drivers WHERE id = $1 LIMIT 1`,
-    [driverId]
-  );
-
-  if (!driverCheck.rowCount) {
-    return jsonError(json, res, 404, "Driver not found");
-  }
-
-  const { rows } = await pool.query(`
-    UPDATE orders
-    SET
-      assigned_driver_id = $2,
-      status = 'assigned'
-    WHERE id = $1
-      AND assigned_driver_id IS NULL
-      AND status IN ('paid', 'ready_for_dispatch')
-      AND EXISTS (SELECT 1 FROM drivers WHERE id = $2 AND active IS TRUE FOR SHARE)
-    RETURNING *
-  `,[orderId, driverId]);
-
-  if (!rows.length) {
-    return jsonError(json, res, 409, "Order or driver unavailable for assignment");
-  }
-  return json(res, 200, rows[0]);
+  const order = await assignCourierOrder(pool, orderId, body.driver_id);
+  return json(res, 200, order);
 
 }
 
