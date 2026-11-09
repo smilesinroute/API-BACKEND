@@ -2,6 +2,7 @@
 
 const { createHash } = require("node:crypto");
 const { requireDispatchAdmin } = require("./dispatchAccess");
+const { sendCourierProof } = require("../drivers/courierProof");
 const { formatDriverCompanyId } = require("../lib/driverCompanyId");
 
 const companyId = 1;
@@ -9,8 +10,11 @@ const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const fields = `o.id, o.status, o.service_type, o.payment_status, o.customer_name,
   o.pickup_address, o.delivery_address, o.assigned_driver_id, o.created_at,
   o.scheduled_date::text, o.scheduled_time::text, o.pickup_at, o.delivered_at,
+  (o.pickup_photo_taken IS TRUE OR NULLIF(o.pickup_photo_url, '') IS NOT NULL) AS pickup_recorded,
+  (o.pickup_photo_url LIKE 'order-proofs/' || o.id || '/pickup-%') IS TRUE AS has_pickup_proof,
+  (o.delivered_photo_url LIKE 'order-proofs/' || o.id || '/delivery-%') IS TRUE AS has_delivery_proof,
   d.name AS driver_name, d.driver_number::text, d.active AS driver_active,
-  m.order_id IS NOT NULL AS entered_manually, b.number::text AS business_request_number`;
+  m.order_id IS NOT NULL AS entered_manually, b.id AS business_request_id, b.number::text AS business_request_number`;
 
 function fail(statusCode, message) {
   throw Object.assign(new Error(message), { statusCode });
@@ -183,7 +187,11 @@ async function handleDispatchOrders(req, res, pool, parsed, json) {
   res.setHeader("Cache-Control", "no-store");
   try {
     const actor = await requireDispatchAdmin(req, "Dispatch orders", "manage dispatch orders");
-    if (req.method === "GET") json(res, 200, await listBoard(pool));
+    if (req.method === "GET") {
+      const proof = parsed.searchParams.get("proof");
+      if (proof) await sendCourierProof(res, pool, requiredId(parsed.searchParams.get("order"), "order"), proof);
+      else json(res, 200, await listBoard(pool));
+    }
     else if (req.method === "POST") {
       const body = await readBody(req);
       if (body.action === "create") json(res, 201, { order: await createManualOrder(pool, body, actor) });

@@ -20,6 +20,7 @@ const { handleDriverRoutes } = require("./src/drivers/driverRoutes");
 const { handleDriverOrders } = require("./src/drivers/driverOrders");
 const { handleDriverLocation } = require("./src/drivers/driverLocation");
 const { handleDriverProof } = require("./src/drivers/driverProof");
+const { handleCourierProof } = require("./src/drivers/courierProof");
 
 const { handleCompanySignup } = require("./src/controllers/companySignup");
 
@@ -146,6 +147,7 @@ async function handleAPI(req, res, pool) {
     /* ===============================
        DRIVER APP
     =============================== */
+    if (await handleCourierProof(req, res, pool, parsed.pathname, json)) return;
     if (await handleDriverLogin(req, res, pool)) return;
     if (await handleDriverRoutes(req, res, pool, pathname, method)) return;
     if (parsed.pathname === "/api/driver/orders" && method === "GET") {
