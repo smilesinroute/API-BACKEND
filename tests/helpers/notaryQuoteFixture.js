@@ -121,7 +121,11 @@ function createPool(seed = {}) {
 const quoted = {
   quoteRequired: false,
   notaryFeeCents: 2000,
-  travelFeeCents: 1500,
+  travelFeeCents: 2400,
+  notarialActs: 2,
+  travelMiles: 12,
+  travelPerMileCents: 200,
+  travelMinimumCents: 2000,
   quoteRevision: REV,
   documents: 2,
   signers: 1,

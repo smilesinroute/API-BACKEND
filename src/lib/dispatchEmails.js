@@ -72,6 +72,8 @@ async function sendCustomerPaymentLink({ to, paymentLink, order }) {
   if (order.service_type === "notary") {
     const quote = require("./notaryQuote").savedQuote(order);
     const dollars = cents => `$${(cents / 100).toFixed(2)}`;
+    const notaryLabel = quote.notarialActs ? `Notary fees (${quote.notarialActs} at $10.00 per act)` : "Notary fees";
+    const travelLabel = quote.notarialActs ? `Travel fee (${quote.travelMiles} one-way road miles at ${dollars(quote.travelPerMileCents)}/mile, ${dollars(quote.travelMinimumCents)} minimum)` : "Travel fee";
     const time = order.requested_time?.label || String(order.scheduled_time || "").slice(0, 5);
     return withTimeout(sendMail({ to, subject: "Your mobile notary quote and payment link", text: `
 Your mobile notary request has been reviewed. Please review these proposed details and fees before paying.
@@ -82,9 +84,11 @@ ${order.pickup_address}
 Requested appointment:
 ${order.scheduled_date} · ${time} (${TIME_ZONE})
 
-Notary fees: ${dollars(quote.notaryFeeCents)}
-Travel fee: ${dollars(quote.travelFeeCents)}
+${notaryLabel}: ${dollars(quote.notaryFeeCents)}
+${travelLabel}: ${dollars(quote.travelFeeCents)}
 Total: ${dollars(quote.notaryFeeCents + quote.travelFeeCents)}
+
+The travel fee is separate from the notarial act fee. Its amount is set by Smiles in Route Transportation LLC and is not determined by Oregon law. Pay only if you agree to the quoted travel fee and total in advance.
 
 If you accept this quote, complete payment at:
 ${paymentLink}

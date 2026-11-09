@@ -47,14 +47,22 @@ async function createPaymentSession(order) {
     name: `Courier Service – Order ${order.id.slice(0, 8)}`,
   }, unit_amount: amountCents }, quantity: 1 }];
   let options;
+  let customText;
   if (order.service_type === "notary") {
     const quote = require("./notaryQuote").savedQuote(order);
+    const acts = quote.notarialActs ?? 1;
     lineItems = [
-      ["Mobile notary fees", quote.notaryFeeCents],
-      ["Notary travel fee", quote.travelFeeCents],
-    ].filter(([, cents]) => cents > 0).map(([name, cents]) => ({
-      price_data: { currency: "usd", product_data: { name }, unit_amount: cents }, quantity: 1,
+      ["Mobile notary fees", quote.notaryFeeCents / acts, acts],
+      [quote.notarialActs ? `Notary travel fee – ${quote.travelMiles} one-way road miles` : "Notary travel fee", quote.travelFeeCents, 1],
+    ].filter(([, cents]) => cents > 0).map(([name, cents, quantity]) => ({
+      price_data: { currency: "usd", product_data: { name }, unit_amount: cents }, quantity,
     }));
+    if (quote.notarialActs) {
+      const travel = `$${(quote.travelFeeCents / 100).toFixed(2)}`;
+      customText = { submit: {
+        message: `By paying, you agree to the separate ${travel} travel fee. Its amount is set by Smiles in Route Transportation LLC and is not determined by Oregon law.`,
+      } };
+    }
     options = { idempotencyKey: `notary:${order.id}:${quote.quoteRevision}`, timeout: 15000, maxNetworkRetries: 0 };
   }
 
@@ -66,6 +74,7 @@ async function createPaymentSession(order) {
     customer_email: order.customer_email || undefined,
 
     line_items: lineItems,
+    ...(customText && { custom_text: customText }),
 
     /* Critical for webhook reconciliation */
     metadata: {

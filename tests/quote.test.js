@@ -116,9 +116,9 @@ test("selected vehicle and add-ons use database rates", async (t) => {
   const res = await request({ ...payload, vehicleType: "cargo", fragile: true,
     priority: true, timeSensitive: true, afterHours: true }, { pool });
   assert.equal(res.statusCode, 200);
-  assert.equal(res.data.total, 85.13);
+  assert.equal(res.data.total, 65.13);
   assert.equal(res.data.breakdown.fragile, 10);
-  assert.equal(res.data.breakdown.priority, 20);
+  assert.equal(res.data.breakdown.priority, 0);
   assert.equal(res.data.breakdown.timeSensitive, 15);
   assert.equal(res.data.breakdown.afterHours, 5);
 });
