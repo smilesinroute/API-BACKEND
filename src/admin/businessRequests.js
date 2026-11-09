@@ -158,6 +158,14 @@ async function update(req, res, pool, json, actor) {
 }
 
 async function list(res, pool, json, params) {
+  const id = params.get("id");
+  if (id !== null) {
+    if (!uuid.test(id)) fail(400, "Choose a valid business request.");
+    const { rows } = await pool.query(
+      `SELECT ${fields} FROM ${table} WHERE company_id = $1 AND id = $2`, [companyId, id]
+    );
+    return json(res, 200, { requests: rows, next_before: null });
+  }
   const view = params.get("view") ?? "open";
   const before = params.get("before");
   const statuses = view === "open" ? ["new", "reviewing", "quoted"] : view === "closed" ? ["accepted", "declined"] : null;

@@ -65,11 +65,13 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           delivery_address,
           scheduled_date,
           scheduled_time,
+          payment_status,
+          (pickup_photo_taken IS TRUE OR NULLIF(pickup_photo_url, '') IS NOT NULL) AS pickup_recorded,
           created_at
         FROM orders
         WHERE assigned_driver_id = $1
           AND service_type = 'courier'
-          AND status IN ('assigned', 'en_route', 'in_progress')
+          AND status IN ('assigned', 'en_route', 'in_progress', 'picked_up', 'out_for_delivery')
         ORDER BY created_at ASC
         `,
         [driver.id]

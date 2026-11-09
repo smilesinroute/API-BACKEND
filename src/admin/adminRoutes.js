@@ -84,6 +84,8 @@ function laneForStatus(status) {
     case "ready_for_dispatch":
     case "assigned":
     case "en_route":
+    case "picked_up":
+    case "out_for_delivery":
     case "in_progress":
       return "active";
 
@@ -120,8 +122,10 @@ async function buildDashboardPayload(pool) {
       o.assigned_driver_id,
       d.name AS driver_name,
       o.assigned_driver_id IS NOT NULL AND d.active IS NOT TRUE AS needs_reassignment,
+      m.order_id IS NOT NULL AS entered_manually,
       o.created_at
     FROM orders o
+    LEFT JOIN dispatch_private.manual_orders m ON m.order_id = o.id
     LEFT JOIN drivers d
       ON d.id = o.assigned_driver_id
     WHERE o.status NOT IN ('completed','rejected','cancelled')
