@@ -215,6 +215,33 @@ function readJson(req) {
    ORDER APPROVAL
 ====================================================== */
 
+async function respondWithPaymentLink(json, res, order, session) {
+  let emailSent = false;
+  try {
+    const result = await sendCustomerPaymentLink({
+      to: order.customer_email,
+      paymentLink: session.url,
+      order,
+    });
+    if (result?.error || !result?.data?.id) {
+      throw new Error(result?.error?.message || "The email provider did not confirm the send");
+    }
+    emailSent = true;
+  } catch (error) {
+    console.error("[PAYMENT LINK EMAIL]", error.message);
+  }
+
+  return json(res, 200, {
+    success: true,
+    orderId: order.id,
+    email_sent: emailSent,
+    payment_url: session.url,
+    message: emailSent
+      ? "Approved and payment link email sent."
+      : "Approved. Email sending could not be confirmed. Copy the saved link in Awaiting payment.",
+  });
+}
+
 async function approveOrder(pool, json, res, orderId, req) {
 
   const order = await loadOrder(pool, orderId);
@@ -244,12 +271,7 @@ async function approveOrder(pool, json, res, orderId, req) {
     const { readQuoteBody, approveNotaryQuote } = require("../lib/notaryQuote");
     const body = await readQuoteBody(req);
     const approved = await approveNotaryQuote(pool, orderId, body, createPaymentSession);
-    let emailSent = true;
-    try { await sendCustomerPaymentLink({ to: approved.order.customer_email, paymentLink: approved.session.url, order: approved.order }); }
-    catch (error) { emailSent = false; console.error("[NOTARY QUOTE EMAIL]", error.message); }
-    return json(res, 200, { success: true, orderId, email_sent: emailSent,
-      payment_url: approved.session.url,
-      message: emailSent ? "Quote approved and email sent." : "Quote approved, but email delivery could not be confirmed. The saved payment link is available in Awaiting Payment." });
+    return respondWithPaymentLink(json, res, approved.order, approved.session);
   }
 
   let session;
@@ -279,13 +301,7 @@ async function approveOrder(pool, json, res, orderId, req) {
     WHERE id = $1
   `,[order.id, session.id, session.url]);
 
-  sendCustomerPaymentLink({
-    to: email,
-    paymentLink: session.url,
-    order
-  }).catch(err => console.error("[EMAIL ERROR]", err));
-
-  return json(res, 200, { success: true, orderId: order.id });
+  return respondWithPaymentLink(json, res, { ...order, customer_email: email }, session);
 
 }
 
