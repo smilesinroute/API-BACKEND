@@ -74,6 +74,12 @@ async function handleDriverRecordPhoto(req, res, pool, scope, method, json) {
     // Keep the driver record present while the photo is saved.
     const driver = await client.query(driverQuery + " FOR SHARE", scope);
     if (!driver.rowCount) throw photoError(404, "Driver not found.");
+    // Queue the Sheets refresh in the same transaction and publish it only after the upload succeeds.
+    await client.query(
+      `UPDATE dispatch_private.business_request_sheet
+       SET revision = revision + 1 WHERE company_id = $1 AND spreadsheet_id IS NOT NULL`,
+      [scope[0]]
+    );
     const path = photoPrefix + driver.rows[0].id + ".jpg";
     const { supabase } = require("../lib/supabase");
     const { error } = await supabase.storage.from(bucketName).upload(path, photo, {

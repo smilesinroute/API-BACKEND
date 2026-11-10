@@ -1,11 +1,16 @@
 "use strict";
 
+const { formatDriverCompanyId } = require("../lib/driverCompanyId");
+const { bucketName, photoPrefix } = require("./driverRecordPhoto");
+
 const table = "dispatch_private.business_request_sheet";
 const title = "Business Requests";
 const headers = [
   "Smiles In Route Request ID", "Source", "Request type", "Status", "Received (UTC)",
   "Requested date", "Stops", "Quote (USD)", "Accepted (UTC)", "Updated (UTC)",
 ];
+const photoHeaders = ["Driver ID", "Driver name", "Private selfie"];
+const adminPhotoUrl = "https://admin.smilesinroute.delivery/.netlify/functions/admin-drivers";
 const maxRows = 10000;
 const options = { timeout: 5000, retry: false };
 
@@ -37,6 +42,47 @@ async function readConfig(db) {
 
 async function readSheetStatus(pool) {
   return status(await readConfig(pool));
+}
+
+async function driverPhotoRequests(db, sheets, spreadsheetId, tab) {
+  // A matching header opts the connected workbook into the private photo index.
+  if (!tab || tab.sheetType !== "GRID" || tab.gridProperties.columnCount < photoHeaders.length) return [];
+  const existing = await sheets.values.get({ spreadsheetId, range: "'Driver Photos'!A1:C1" }, options);
+  const actual = existing.data.values?.[0] ?? [];
+  if (photoHeaders.some((name, index) => name !== actual[index])) return [];
+
+  const { rows } = await db.query(
+    `SELECT d.id, d.name, d.driver_number::text AS driver_number
+     FROM public.drivers d
+     WHERE d.company_id = 1 AND EXISTS (
+       SELECT 1 FROM storage.objects
+       WHERE bucket_id = $1 AND name = $2 || d.id::text || '.jpg'
+     )
+     ORDER BY d.driver_number, d.id`,
+    [bucketName, photoPrefix]
+  );
+  const { sheetId, gridProperties: { rowCount } } = tab;
+  const requiredRows = Math.max(rowCount, rows.length + 1, 2);
+  const requests = [];
+  if (requiredRows > rowCount) {
+    requests.push({ appendDimension: { sheetId, dimension: "ROWS", length: requiredRows - rowCount } });
+  }
+  requests.push({ updateCells: {
+    range: { sheetId, startRowIndex: 1, endRowIndex: requiredRows, startColumnIndex: 0, endColumnIndex: photoHeaders.length },
+    fields: "userEnteredValue,textFormatRuns",
+    rows: rows.map((driver) => ({ values: [
+      { userEnteredValue: { stringValue: formatDriverCompanyId(driver.driver_number) ?? driver.id } },
+      { userEnteredValue: { stringValue: driver.name ?? "" } },
+      {
+        userEnteredValue: { stringValue: "View selfie (Admin)" },
+        textFormatRuns: [{
+          startIndex: 0,
+          format: { link: { uri: adminPhotoUrl + "?photo=" + encodeURIComponent(driver.id) } },
+        }],
+      },
+    ] })),
+  } });
+  return requests;
 }
 
 async function writeReport(db, spreadsheetId) {
@@ -103,6 +149,7 @@ async function writeReport(db, spreadsheetId) {
         userEnteredValue: typeof value === "number" ? { numberValue: value } : { stringValue: value ?? "" },
       })) })),
     } });
+    requests.push(...await driverPhotoRequests(db, sheets, spreadsheetId, tabs.find((item) => item.title === "Driver Photos")));
     await sheets.batchUpdate({ spreadsheetId, requestBody: { requests } }, options);
   } catch (error) {
     if (error.statusCode) throw error;
