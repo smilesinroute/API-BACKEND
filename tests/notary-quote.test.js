@@ -251,12 +251,14 @@ function routerFixture(pool, mailFails = false) {
     created = 0;
   const routes = load('src/admin/adminRoutes.js', (id) => {
     if (id === './adminAuth') return require('../src/admin/adminAuth');
+    if (id === './dispatchOrders') return { assignCourierOrder: async () => assert.fail('Unexpected assignment') };
     if (id === '../lib/notaryQuote') return require('../src/lib/notaryQuote');
     if (id === '../lib/dispatchEmails')
       return {
         sendCustomerPaymentLink: async () => {
           sent++;
           if (mailFails) throw new Error('isolated mail timeout');
+          return { data: { id: 'isolated-email' } };
         },
       };
     if (id === '../lib/stripeCheckout')
@@ -371,7 +373,7 @@ test('malformed JSON and oversized requests are rejected without a quote update'
   );
   assert.equal(pool.state.total_amount, null);
 });
-test('Notary checkout has separate fees and a stable revision-based idempotency key; Courier keeps its existing checkout', async (t) => {
+test('Notary checkout stays itemized and Courier checkout retries use a stable key', async (t) => {
   const oldSuccess = process.env.STRIPE_SUCCESS_URL,
     oldCancel = process.env.STRIPE_CANCEL_URL;
   process.env.STRIPE_SUCCESS_URL = 'https://example.com/success';
@@ -417,7 +419,8 @@ test('Notary checkout has separate fees and a stable revision-based idempotency 
     service_type: 'courier',
   });
   assert.equal(calls[1].params.line_items.length, 1);
-  assert.equal(calls[1].options, undefined);
+  assert.equal(calls[1].options.idempotencyKey, `courier:${ID}:${REV}:3500`);
+  assert.equal(calls[1].options.maxNetworkRetries, 0);
   assert.match(
     calls[1].params.line_items[0].price_data.product_data.name,
     /Courier/,

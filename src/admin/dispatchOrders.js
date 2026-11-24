@@ -8,6 +8,7 @@ const { formatDriverCompanyId } = require("../lib/driverCompanyId");
 const companyId = 1;
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const fields = `o.id, o.status, o.service_type, o.payment_status, o.customer_name,
+  o.customer_email, o.notes, o.total_amount, o.pricing_breakdown, o.document_type, o.signers, o.stripe_checkout_url,
   o.pickup_address, o.delivery_address, o.assigned_driver_id, o.created_at,
   o.scheduled_date::text, o.scheduled_time::text, o.pickup_at, o.delivered_at,
   (o.pickup_photo_taken IS TRUE OR NULLIF(o.pickup_photo_url, '') IS NOT NULL) AS pickup_recorded,
