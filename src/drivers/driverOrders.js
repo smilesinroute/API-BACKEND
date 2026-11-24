@@ -70,6 +70,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           created_at
         FROM orders
         WHERE assigned_driver_id = $1
+          AND archived_at IS NULL
           AND service_type = 'courier'
           AND status IN ('assigned', 'en_route', 'in_progress', 'picked_up', 'out_for_delivery')
         ORDER BY created_at ASC
@@ -121,6 +122,7 @@ async function handleDriverOrders(req, res, pool, pathname, method) {
           assigned_driver_id = $2,
           assigned_at = NOW()
         WHERE id = $1
+          AND archived_at IS NULL
           AND status = 'ready_for_dispatch'
           AND payment_status = 'paid'
           AND assigned_driver_id IS NULL

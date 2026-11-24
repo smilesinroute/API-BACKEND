@@ -34,6 +34,7 @@ function revision(value) {
   return value;
 }
 function editable(order) {
+  if (order.archived_at) throw error(409, 'Restore this archived order before reviewing it.');
   if (order.service_type !== 'notary')
     throw error(400, 'This quote action is for Notary requests only.');
   if (

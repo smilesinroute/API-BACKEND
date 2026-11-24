@@ -129,7 +129,7 @@ async function buildDashboardPayload(pool) {
     LEFT JOIN dispatch_private.manual_orders m ON m.order_id = o.id
     LEFT JOIN drivers d
       ON d.id = o.assigned_driver_id
-    WHERE o.status NOT IN ('completed','rejected','cancelled')
+    WHERE o.archived_at IS NULL AND o.status NOT IN ('completed','rejected','cancelled')
     ORDER BY o.created_at DESC
   `);
 
@@ -296,6 +296,7 @@ async function rejectOrder(pool, json, res, orderId) {
   const { rowCount } = await pool.query(
     `UPDATE orders SET status = 'rejected'
      WHERE id = $1
+       AND archived_at IS NULL
        AND status IN ('pending', 'pending_admin_review', 'confirmed_pending_payment')
        AND (payment_status IS NULL OR payment_status = 'unpaid')
        AND stripe_session_id IS NULL
@@ -376,6 +377,7 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       const { rows } = await pool.query(`
         SELECT *
         FROM orders
+        WHERE archived_at IS NULL
         ORDER BY created_at DESC
       `);
 
