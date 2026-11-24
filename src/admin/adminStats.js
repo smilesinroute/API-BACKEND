@@ -13,7 +13,7 @@ async function handleAdminStats(req, res, pool, pathname, method, json) {
     );
 
     const orders = await pool.query(
-      "SELECT COUNT(*) FROM orders WHERE status='active'"
+      "SELECT COUNT(*) FROM orders WHERE status='active' AND archived_at IS NULL"
     );
 
     const users = await pool.query(

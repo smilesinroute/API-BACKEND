@@ -7,7 +7,7 @@ const { formatDriverCompanyId } = require("../lib/driverCompanyId");
 
 const companyId = 1;
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const fields = `o.id, o.status, o.service_type, o.payment_status, o.customer_name,
+const fields = `o.archived_at, o.id, o.status, o.service_type, o.payment_status, o.customer_name,
   o.customer_email, o.notes, o.total_amount, o.pricing_breakdown, o.document_type, o.signers, o.stripe_checkout_url,
   o.pickup_address, o.delivery_address, o.assigned_driver_id, o.created_at,
   o.scheduled_date::text, o.scheduled_time::text, o.pickup_at, o.delivered_at,
@@ -87,6 +87,7 @@ async function assignCourierOrder(pool, orderId, driverId) {
     `UPDATE public.orders o
         SET assigned_driver_id = $2, status = 'assigned'
       WHERE o.id = $1 AND (o.company_id = $3 OR o.company_id IS NULL)
+        AND o.archived_at IS NULL
         AND o.service_type = 'courier' AND o.payment_status = 'paid'
         AND o.status IN ('paid', 'ready_for_dispatch') AND o.assigned_driver_id IS NULL
         AND EXISTS (SELECT 1 FROM public.drivers d
@@ -99,9 +100,35 @@ async function assignCourierOrder(pool, orderId, driverId) {
   );
   const [order] = existing.rows;
   if (!order) fail(404, "Order not found.");
-  if (order.assigned_driver_id !== driverId || !["assigned", "en_route", "in_progress"].includes(order.status)) {
+  if (order.archived_at || order.assigned_driver_id !== driverId || !["assigned", "en_route", "in_progress"].includes(order.status)) {
     fail(409, "This order or driver is no longer available for assignment. Refresh the board.");
   }
+  return order;
+}
+
+async function archiveOrder(pool, body, actor) {
+  const id = requiredId(body.order_id, "order");
+  const restoring = body.action === "restore";
+  const { rows } = await pool.query(
+    restoring
+      ? `UPDATE public.orders SET archived_at = NULL, archived_by = NULL
+          WHERE id = $1 AND (company_id = $2 OR company_id IS NULL) RETURNING id`
+      : `UPDATE public.orders SET archived_at = COALESCE(archived_at, NOW()),
+            archived_by = CASE WHEN archived_at IS NULL THEN $3 ELSE archived_by END
+          WHERE id = $1 AND (company_id = $2 OR company_id IS NULL)
+            AND (status IN ('completed','delivered','rejected','cancelled','canceled','payment_expired')
+              OR (assigned_driver_id IS NULL AND status IN
+                ('pending','pending_admin_review','confirmed_pending_payment','approved_pending_payment','paid','ready_for_dispatch')))
+          RETURNING id`,
+    restoring ? [id, companyId] : [id, companyId, actor]
+  );
+  if (!rows.length) {
+    const existing = await pool.query(
+      "SELECT id FROM public.orders WHERE id = $1 AND (company_id = $2 OR company_id IS NULL)", [id, companyId]);
+    if (!existing.rows.length) fail(404, "Order not found.");
+    fail(409, "This job is in progress. Finish or cancel it before archiving.");
+  }
+  const [order] = await orderRows(pool, id);
   return order;
 }
 
@@ -196,6 +223,7 @@ async function handleDispatchOrders(req, res, pool, parsed, json) {
     else if (req.method === "POST") {
       const body = await readBody(req);
       if (body.action === "create") json(res, 201, { order: await createManualOrder(pool, body, actor) });
+      else if (["archive", "restore"].includes(body.action)) json(res, 200, { order: await archiveOrder(pool, body, actor) });
       else if (body.action === "assign") {
         const assigned = await assignCourierOrder(pool, body.order_id, body.driver_id);
         const [order] = await orderRows(pool, assigned.id);

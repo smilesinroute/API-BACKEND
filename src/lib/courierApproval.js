@@ -8,6 +8,7 @@ function fail(statusCode, message) {
 }
 
 function ensureReviewable(order) {
+  if (order.archived_at) fail(409, "Restore this archived order before reviewing it.");
   if (order.service_type !== "courier") fail(400, "Choose a courier order.");
   if (!reviewStatuses.includes(order.status) || ![null, undefined, "unpaid"].includes(order.payment_status) ||
       order.paid_at || order.assigned_driver_id || order.stripe_session_id) {
@@ -58,7 +59,7 @@ async function saveCourierQuote(pool, id, body) {
 
 async function approveCourierOrder(pool, id, body, createSession) {
   return locked(pool, id, async (client, order) => {
-    if (order.service_type === "courier" && order.status === "approved_pending_payment" &&
+    if (!order.archived_at && order.service_type === "courier" && order.status === "approved_pending_payment" &&
         order.stripe_session_id && order.stripe_checkout_url && order.payment_status !== "paid") {
       return { order, session: { id: order.stripe_session_id, url: order.stripe_checkout_url }, reused: true };
     }

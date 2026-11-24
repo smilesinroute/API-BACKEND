@@ -87,6 +87,7 @@ test('zero total, excessive total and missing revision cannot be saved', async (
     );
 });
 for (const [label, change] of [
+  ['archived', { archived_at: '2026-11-24T00:00:00Z' }],
   ['paid', { payment_status: 'paid' }],
   ['approved', { status: 'approved_pending_payment' }],
   ['assigned', { assigned_driver_id: 'driver-1' }],
@@ -450,4 +451,20 @@ test('customer Notary email lists both fees and does not use Courier pickup/deli
   assert.match(mail.text, /Travel fee: \$15.00/);
   assert.match(mail.text, /Total: \$35.00/);
   assert.doesNotMatch(mail.text, /Courier Delivery|assign your driver/);
+});
+
+test('archived requests cannot create or reuse checkout links', async () => {
+  const archived_at = '2026-11-24T00:00:00Z';
+  await assert.rejects(approveNotaryQuote(quotedPool({ archived_at }), ID,
+    { expected_quote_revision: REV }, async () => assert.fail('No archived checkout'), now),
+    e => e.statusCode === 409);
+  const { saveCourierQuote, approveCourierOrder } = require('../src/lib/courierApproval');
+  await assert.rejects(saveCourierQuote(createPool({ service_type: 'courier', archived_at }), ID,
+    { total_amount: '20', expected_quote_revision: null }), e => e.statusCode === 409);
+  for (const status of ['pending', 'approved_pending_payment']) {
+    const pool = createPool({ service_type: 'courier', status, archived_at,
+      stripe_session_id: 'cs_old', stripe_checkout_url: 'https://example.com/saved' });
+    await assert.rejects(approveCourierOrder(pool, ID, {}, async () => assert.fail('No archived checkout')),
+      e => e.statusCode === 409);
+  }
 });
