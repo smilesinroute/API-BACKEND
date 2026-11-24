@@ -37,7 +37,7 @@ function editable(order) {
   if (order.service_type !== 'notary')
     throw error(400, 'This quote action is for Notary requests only.');
   if (
-    !['pending_admin_review', 'confirmed_pending_payment'].includes(
+    !['pending', 'pending_admin_review', 'confirmed_pending_payment'].includes(
       order.status,
     ) ||
     ![null, undefined, 'unpaid'].includes(order.payment_status) ||

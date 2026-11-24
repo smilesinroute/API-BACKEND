@@ -49,7 +49,7 @@ function parseOrderActionPath(pathname) {
   const action = parts[3];
 
   if (!isNonEmptyString(orderId)) return null;
-  if (!["approve", "reject", "assign", "notary-quote"].includes(action)) return null;
+  if (!["approve", "reject", "assign", "notary-quote", "courier-quote"].includes(action)) return null;
 
   return { orderId, action };
 }
@@ -73,6 +73,7 @@ async function loadOrder(pool, orderId) {
 
 function laneForStatus(status) {
   switch (status) {
+    case "pending":
     case "pending_admin_review":
     case "confirmed_pending_payment":
       return "action_required";
@@ -250,7 +251,8 @@ async function approveOrder(pool, json, res, orderId, req) {
     return jsonError(json, res, 404, "Order not found");
   }
 
-  if (!["pending_admin_review","confirmed_pending_payment"].includes(order.status)) {
+  if (!["pending", "pending_admin_review","confirmed_pending_payment"].includes(order.status) &&
+      !(order.service_type === "courier" && order.status === "approved_pending_payment")) {
 
     return jsonError(
       json,
@@ -274,34 +276,14 @@ async function approveOrder(pool, json, res, orderId, req) {
     return respondWithPaymentLink(json, res, approved.order, approved.session);
   }
 
-  let session;
-
-  try {
-
-    session = await createPaymentSession({
-      ...order,
-      customer_email: email,
-      total_amount: total
-    });
-
-  } catch (err) {
-
-    console.error("[STRIPE ERROR]", err);
-
-    return jsonError(json, res, 502, "Stripe session creation failed");
-
+  const { approveCourierOrder } = require("../lib/courierApproval");
+  const body = await readJson(req);
+  const approved = await approveCourierOrder(pool, orderId, body, createPaymentSession);
+  if (approved.reused) {
+    return json(res, 200, { success: true, orderId, payment_url: approved.session.url,
+      message: "This request is already approved. Its saved payment link is available." });
   }
-
-  await pool.query(`
-    UPDATE orders
-    SET
-      status = 'approved_pending_payment',
-      stripe_session_id = $2,
-      stripe_checkout_url = $3
-    WHERE id = $1
-  `,[order.id, session.id, session.url]);
-
-  return respondWithPaymentLink(json, res, { ...order, customer_email: email }, session);
+  return respondWithPaymentLink(json, res, approved.order, approved.session);
 
 }
 
@@ -314,22 +296,17 @@ async function rejectOrder(pool, json, res, orderId) {
   const { rowCount } = await pool.query(
     `UPDATE orders SET status = 'rejected'
      WHERE id = $1
-       AND (
-         service_type IS DISTINCT FROM 'notary'
-         OR (
-           status IN ('pending_admin_review', 'confirmed_pending_payment')
-           AND (payment_status IS NULL OR payment_status = 'unpaid')
-           AND stripe_session_id IS NULL
-           AND paid_at IS NULL
-           AND assigned_driver_id IS NULL
-         )
-       )`,
+       AND status IN ('pending', 'pending_admin_review', 'confirmed_pending_payment')
+       AND (payment_status IS NULL OR payment_status = 'unpaid')
+       AND stripe_session_id IS NULL
+       AND paid_at IS NULL
+       AND assigned_driver_id IS NULL`,
     [orderId]
   );
 
   if (!rowCount) {
     if (await loadOrder(pool, orderId)) {
-      return jsonError(json, res, 409, "This Notary request has moved forward and can no longer be rejected.");
+      return jsonError(json, res, 409, "This request has moved forward and can no longer be rejected.");
     }
     return jsonError(json, res, 404, "Order not found");
   }
@@ -415,6 +392,13 @@ async function handleAdminRoutes(req, res, pool, pathname, method, json) {
       requireAdmin(req);
 
       const { orderId, action } = actionMatch;
+
+      if (action === "courier-quote") {
+        const { saveCourierQuote } = require("../lib/courierApproval");
+        const order = await saveCourierQuote(pool, orderId, await readJson(req));
+        json(res, 200, { success: true, order });
+        return true;
+      }
 
       if (action === "notary-quote") {
         const { readQuoteBody, saveNotaryQuote } = require("../lib/notaryQuote");

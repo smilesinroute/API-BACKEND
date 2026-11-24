@@ -46,7 +46,10 @@ async function createPaymentSession(order) {
   let lineItems = [{ price_data: { currency: "usd", product_data: {
     name: `Courier Service – Order ${order.id.slice(0, 8)}`,
   }, unit_amount: amountCents }, quantity: 1 }];
-  let options;
+  let options = {
+    idempotencyKey: `courier:${order.id}:${order.pricing_breakdown?.quoteRevision || "initial"}:${amountCents}`,
+    timeout: 15000, maxNetworkRetries: 0,
+  };
   if (order.service_type === "notary") {
     const quote = require("./notaryQuote").savedQuote(order);
     lineItems = [
